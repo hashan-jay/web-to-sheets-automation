@@ -87,7 +87,12 @@ STATUS_RANK = {
 from src.config import Settings, persist_env_values
 from src.database import GatheringDB, _transaction_from_payload
 from src.mapper import record_local_datetime
-from src.pipeline import process_new_notifications_only, run_pipeline, txn_row_event
+from src.pipeline import (
+    process_new_notifications_only,
+    run_pipeline,
+    sync_date_to_sheet,
+    txn_row_event,
+)
 from src.tally import COMPLETED_STATUS, format_amount, local_today, parse_amount, txn_kind
 from src.watcher import NotificationWatcher
 
@@ -136,6 +141,9 @@ class FinanceAutomationApp:
         self.deposit_status_filter = tk.StringVar(value="All")
         self.withdraw_status_filter = tk.StringVar(value="All")
         self.sent_type_filter = tk.StringVar(value="All types")
+        self.sent_date_filter = tk.StringVar(value=local_today())
+        self.sheet_date_count = 0
+        self.sheet_tally_date = ""
         self.deposit_extended = False
         self.extend_btn_text = tk.StringVar(value="Show hidden details")
         self.poll_interval = tk.IntVar(value=self.settings.poll_interval_seconds)
@@ -493,6 +501,16 @@ class FinanceAutomationApp:
         ttk.Label(bar, textvariable=self.sent_title, style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
         controls = ttk.Frame(bar, style="Card.TFrame")
         controls.grid(row=0, column=1, sticky="e")
+        ttk.Label(controls, text="Date", style="Muted.TLabel").pack(side="left")
+        self.sent_date_combo = ttk.Combobox(
+            controls,
+            textvariable=self.sent_date_filter,
+            state="readonly",
+            width=14,
+            values=self._date_filter_options(),
+        )
+        self.sent_date_combo.pack(side="left", padx=(6, 8))
+        self.sent_date_combo.bind("<<ComboboxSelected>>", self._on_filters_changed)
         ttk.Label(controls, text="Type", style="Muted.TLabel").pack(side="left")
         self.sent_type_combo = ttk.Combobox(
             controls,
@@ -503,10 +521,14 @@ class FinanceAutomationApp:
         )
         self.sent_type_combo.pack(side="left", padx=(6, 8))
         self.sent_type_combo.bind("<<ComboboxSelected>>", self._on_filters_changed)
-        ttk.Button(controls, text="Refresh sent list", command=self._reload_workspace).pack(side="left")
+        ttk.Button(
+            controls,
+            text="Sync Records with Google Sheet",
+            command=self._sync_records_with_sheet,
+        ).pack(side="left")
         ttk.Label(
             page,
-            text="Already written to Google Sheets. Use this list to tally sent deposits and withdrawals.",
+            text="Today's sent rows by default. Sync restores any selected-date rows that were deleted from the Google Sheet.",
             style="Muted.TLabel",
         ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 0))
         self.sent_tree = self._make_tree(page, "sent", ALL_COLUMNS, "ID Transaction")
@@ -650,10 +672,12 @@ class FinanceAutomationApp:
         return selected
 
     def _select_today(self) -> None:
-        self.date_filter.set(local_today())
+        today = local_today()
+        self.date_filter.set(today)
+        self.sent_date_filter.set(today)
         self._refresh_filter_options()
         self._apply_filters()
-        self._append_log(f"Date filter set to today ({local_today()}).")
+        self._append_log(f"Date filter set to today ({today}).")
 
     def _current_settings(self) -> Settings:
         settings = Settings.load()
@@ -711,6 +735,29 @@ class FinanceAutomationApp:
             )
             return
         self._start_sheet_send(ids, "latest scrape")
+
+    def _sync_records_with_sheet(self) -> None:
+        if self._busy():
+            messagebox.showinfo("Busy", "A run is already in progress.")
+            return
+        day = self.sent_date_filter.get().strip() or local_today()
+        settings = self._current_settings()
+        self.status_text.set("Syncing Google Sheet...")
+        self.open_sent_after_send = True
+        self._append_log(
+            f"Checking Google Sheet against GUI records for {day}, "
+            "then restoring any missing rows."
+        )
+
+        def work() -> None:
+            try:
+                sync_date_to_sheet(settings, day, on_event=self.events.put)
+            except Exception as exc:
+                self.events.put({"kind": "log", "message": f"Sync failed: {exc}"})
+                self.events.put({"kind": "done", "message": str(exc)})
+
+        self.worker = threading.Thread(target=work, name="sheet-sync", daemon=True)
+        self.worker.start()
 
     def _send_section_to_sheet(self, section: str) -> None:
         if self._busy():
@@ -829,7 +876,11 @@ class FinanceAutomationApp:
             except queue.Empty:
                 break
             self._handle_event(event)
-        if not self._busy() and self.status_text.get() in {"Running...", "Sending to Google Sheet..."}:
+        if not self._busy() and self.status_text.get() in {
+            "Running...",
+            "Sending to Google Sheet...",
+            "Syncing Google Sheet...",
+        }:
             self.status_text.set("Idle")
         self.root.after(120, self._drain_events)
 
@@ -859,8 +910,13 @@ class FinanceAutomationApp:
             self.website_date = str(event.get("date") or "")
             if self.website_date:
                 self.date_filter.set(self.website_date)
+                self.sent_date_filter.set(self.website_date)
             self._refresh_filter_options()
             self._apply_filters()
+        if kind == "sheet_tally":
+            self.sheet_date_count = int(event.get("sheet_count") or 0)
+            self.sheet_tally_date = str(event.get("date") or "")
+            self._update_match_caption()
         if kind == "done":
             self.status_text.set("Idle")
             self.capturing_latest = False
@@ -952,8 +1008,8 @@ class FinanceAutomationApp:
             ordered.append(item)
         return ["All dates", *ordered]
 
-    def _date_matches(self, raw: str) -> bool:
-        selected = self.date_filter.get()
+    def _date_matches(self, raw: str, section: str | None = None) -> bool:
+        selected = self.sent_date_filter.get() if section == "sent" else self.date_filter.get()
         if selected == "All dates":
             return True
         return self._display_date(raw) == selected
@@ -994,7 +1050,7 @@ class FinanceAutomationApp:
     def _row_matches(self, rec: dict, section: str | None = None) -> bool:
         bucket = section or str(rec.get("section") or "")
         return (
-            self._date_matches(str(rec.get("date") or ""))
+            self._date_matches(str(rec.get("date") or ""), bucket)
             and self._type_matches(str(rec.get("type") or ""), bucket)
             and self._status_matches(str((rec.get("tags") or ("",))[0]), bucket)
         )
@@ -1040,7 +1096,7 @@ class FinanceAutomationApp:
             self._section_records("withdraw")
         )
         gui_ids = self._record_ids(dated)
-        sent_ids = self._record_ids(self._dated(self._section_records("sent")))
+        sent_ids = self._record_ids(self._dated(self._section_records("sent"), "sent"))
         latest_ids = self._record_ids(self._section_records("latest", visible_only=True))
         date_sel = self.date_filter.get() or "All dates"
         website = self.website_records
@@ -1053,10 +1109,19 @@ class FinanceAutomationApp:
         compare_date = self.website_date or date_sel
         match = "match" if website and website == len(gui_ids) else "not matched yet"
         sent_match = "match" if website and website == len(sent_ids) else "not sent in full"
+        sheet_bit = ""
+        if self.sheet_date_count and (not self.sheet_tally_date or self.sheet_tally_date in {compare_date, date_sel, self.sent_date_filter.get()}):
+            sheet_live = (
+                "match"
+                if website and self.sheet_date_count == website
+                else "live count"
+            )
+            sheet_bit = f"  ·  Google Sheet live: {self.sheet_date_count} txn ({sheet_live})"
         self.match_caption.set(
             f"{website_bit}  ·  GUI {compare_date}: {len(gui_ids)} txn ({match})  ·  "
             f"Latest scrape: {len(latest_ids)}  ·  "
             f"Google Sheet sent: {len(sent_ids)} txn ({sent_match})"
+            f"{sheet_bit}"
         )
 
     def _update_filter_caption(self) -> None:
@@ -1080,15 +1145,16 @@ class FinanceAutomationApp:
         self.latest_title.set(f"Latest scrape  ·  {len(latest)} row(s) on {date_label}")
         self.deposit_title.set(f"Deposits  ·  {len(deposits)} visible")
         self.withdraw_title.set(f"Withdrawals  ·  {len(withdrawals)} visible")
-        self.sent_title.set(f"Google Sheet sent data  ·  {len(sent)} visible on {date_label}")
+        sent_date = self.sent_date_filter.get() or date_label
+        self.sent_title.set(f"Google Sheet sent data  ·  {len(sent)} visible on {sent_date}")
         self.latest_tally.set(self._section_tally_line("latest", latest))
         self.deposit_tally.set(self._money_tally_line("deposit"))
         self.withdraw_tally.set(self._money_tally_line("withdraw"))
         self.sent_tally.set(self._sent_tally_line(sent))
         self._update_match_caption()
 
-    def _dated(self, recs: list[dict]) -> list[dict]:
-        return [rec for rec in recs if self._date_matches(str(rec.get("date") or ""))]
+    def _dated(self, recs: list[dict], section: str | None = None) -> list[dict]:
+        return [rec for rec in recs if self._date_matches(str(rec.get("date") or ""), section)]
 
     def _section_tally_line(self, section: str, visible: list[dict]) -> str:
         deposits = [rec for rec in visible if self._section_for_type(rec.get("type")) == "deposit"]
@@ -1123,7 +1189,7 @@ class FinanceAutomationApp:
         )
 
     def _sent_tally_line(self, visible: list[dict]) -> str:
-        dated = self._dated(self._section_records("sent"))
+        dated = self._dated(self._section_records("sent"), "sent")
         deposits = [rec for rec in dated if self._section_for_type(rec.get("type")) == "deposit"]
         withdrawals = [rec for rec in dated if self._section_for_type(rec.get("type")) == "withdraw"]
         selected = self._selected_records("sent")
@@ -1139,7 +1205,11 @@ class FinanceAutomationApp:
         date_options = self._date_filter_options()
         if self.date_filter.get() not in date_options:
             self.date_filter.set(local_today())
+        if self.sent_date_filter.get() not in date_options:
+            self.sent_date_filter.set(local_today())
         self.date_combo.configure(values=date_options)
+        if hasattr(self, "sent_date_combo"):
+            self.sent_date_combo.configure(values=date_options)
         self._update_filter_caption()
 
     def _apply_filters(self) -> None:
@@ -1161,6 +1231,7 @@ class FinanceAutomationApp:
             f"Latest type={self.latest_type_filter.get()}, "
             f"Deposits={self.deposit_status_filter.get()}, "
             f"Withdrawals={self.withdraw_status_filter.get()}, "
+            f"Sent date={self.sent_date_filter.get()}, "
             f"Sent type={self.sent_type_filter.get()}."
         )
 

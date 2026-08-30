@@ -6,6 +6,7 @@ from pathlib import Path
 import gspread
 from gspread.exceptions import APIError
 
+from src.mapper import date_key
 from src.models import Transaction
 
 
@@ -16,8 +17,20 @@ class SheetClient:
         self.ws = spreadsheet.worksheet(worksheet) if worksheet else spreadsheet.sheet1
 
     def existing_ids(self) -> set[str]:
-        values = self.ws.col_values(7)
-        return {item.strip() for item in values if item.strip() and item.strip().isdigit()}
+        ids, _by_date = self.id_index()
+        return ids
+
+    def id_index(self) -> tuple[set[str], dict[str, set[str]]]:
+        last_error: Exception | None = None
+        for attempt in range(4):
+            try:
+                return index_sheet_ids(self.ws.col_values(2), self.ws.col_values(7))
+            except APIError as exc:
+                last_error = exc
+                if "429" not in str(exc) or attempt == 3:
+                    raise
+                time.sleep(20 * (attempt + 1))
+        raise last_error or RuntimeError("Google Sheets read failed.")
 
     def next_empty_row(self) -> int:
         ids = self.ws.col_values(7)
@@ -45,6 +58,22 @@ class SheetClient:
                     raise
                 time.sleep(20 * (attempt + 1))
         raise last_error or RuntimeError("Google Sheets write failed.")
+
+
+def index_sheet_ids(
+    datetimes: list[str], ids: list[str]
+) -> tuple[set[str], dict[str, set[str]]]:
+    all_ids: set[str] = set()
+    by_date: dict[str, set[str]] = {}
+    length = max(len(datetimes), len(ids))
+    for index in range(length):
+        txn_id = (ids[index] if index < len(ids) else "").strip()
+        if not txn_id.isdigit():
+            continue
+        all_ids.add(txn_id)
+        day = date_key(datetimes[index] if index < len(datetimes) else "")
+        by_date.setdefault(day, set()).add(txn_id)
+    return all_ids, by_date
 
 
 def new_rows_only(

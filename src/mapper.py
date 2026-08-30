@@ -7,6 +7,7 @@ from src.models import Transaction
 
 TAG_RE = re.compile(r"^\[.*?\]\s*")
 DATE_RE = re.compile(r"(\d{4})-(\d{2})-(\d{2})")
+FULL_DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
 LOCAL_DT_RE = re.compile(
     r"(\d{4}-\d{2}-\d{2})(?:[ T](\d{2}:\d{2})(?::(\d{2}))?)?"
 )
@@ -53,6 +54,15 @@ def day_from_datetime(value: str) -> str:
     return str(int(match.group(3))) if match else ""
 
 
+def date_key(raw: object) -> str:
+    match = FULL_DATE_RE.search(str(raw or ""))
+    return match.group(1) if match else ""
+
+
+def txn_local_date(txn: Transaction) -> str:
+    return date_key(record_local_datetime(txn.datetime, txn.created, txn.processed))
+
+
 def normalize_status(value: str) -> str:
     key = (value or "").strip().upper()
     return STATUS_MAP.get(key, value.title() if value else "")
@@ -88,7 +98,7 @@ def to_sheet_row(txn: Transaction, settings: Settings) -> list[str]:
     return [
         day_from_datetime(when),
         when,
-        settings.default_bank_account,
+        "",
         display_name,
         txn.amount,
         normalize_status(txn.status),

@@ -4,9 +4,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from src.config import Settings
-from src.database import GatheringDB
+from src.database import GatheringDB, _transaction_from_payload
 from src.errors import ConfigError
-from src.mapper import clean_name, resolve_brand, to_sheet_row
+from src.mapper import clean_name, resolve_brand, to_sheet_row, txn_local_date
 from src.models import Transaction
 from src.scraper import scrape_transactions
 from src.tally import COMPLETED_STATUS
@@ -267,3 +267,132 @@ def process_new_notifications_only(
         write_sheet=True,
         only_ids=only_ids,
     )
+
+
+def _unique_transactions(rows: list[Transaction]) -> list[Transaction]:
+    seen: set[str] = set()
+    unique: list[Transaction] = []
+    for txn in rows:
+        if not txn.transaction_id or txn.transaction_id in seen:
+            continue
+        seen.add(txn.transaction_id)
+        unique.append(txn)
+    return unique
+
+
+def transactions_for_date(db: GatheringDB, day: str) -> list[Transaction]:
+    collected: list[Transaction] = []
+    for row in db.all_records():
+        payload = row.get("payload_json")
+        if not payload:
+            continue
+        txn = _transaction_from_payload(payload)
+        record_day = txn_local_date(txn) or str(row.get("created_at") or "")[:10]
+        if day not in {"", "All dates"} and record_day != day:
+            continue
+        collected.append(txn)
+    return _unique_transactions(collected)
+
+
+def sync_date_to_sheet(
+    settings: Settings,
+    day: str,
+    on_event: EventFn | None = None,
+) -> PipelineResult:
+    result = PipelineResult()
+    db = GatheringDB(settings.database_path)
+    candidates = transactions_for_date(db, day)
+    if not candidates:
+        _emit(
+            on_event,
+            kind="log",
+            message=f"No GUI records for {day}. Run now for that date first.",
+        )
+        _emit(on_event, kind="done", message=f"Sync found no GUI records for {day}.", counts=db.counts())
+        return result
+
+    settings.require_sheets()
+    sheet = SheetClient(
+        settings.google_credentials_path,
+        settings.google_sheet_id,
+        settings.google_worksheet,
+    )
+    existing_ids, by_date = sheet.id_index()
+    missing = new_rows_only(candidates, existing_ids)
+    sheet_count = len(by_date.get(day, set())) if day not in {"", "All dates"} else len(existing_ids)
+    _emit(
+        on_event,
+        kind="sheet_tally",
+        date=day,
+        gui_count=len(candidates),
+        sheet_count=sheet_count,
+        missing=len(missing),
+    )
+    _emit(
+        on_event,
+        kind="log",
+        message=(
+            f"Sync {day}: GUI {len(candidates)} txn · "
+            f"Google Sheet {sheet_count} txn · missing {len(missing)}."
+        ),
+    )
+    if not missing:
+        _emit(
+            on_event,
+            kind="log",
+            message=f"Google Sheet already has every GUI record for {day}. Nothing to restore.",
+        )
+        _emit(on_event, kind="done", message=f"Sync complete for {day}. missing=0", counts=db.counts())
+        return result
+
+    rows = [to_sheet_row(txn, settings) for txn in missing]
+    for txn in missing:
+        _emit(
+            on_event,
+            **txn_row_event(txn, "Copying", _row_detail(txn, "Restoring missing row to Google Sheets")),
+        )
+    try:
+        sheet.write_rows(rows)
+    except Exception as exc:
+        for txn in missing:
+            db.mark(txn.transaction_id, "failed", str(exc))
+            result.failed += 1
+            _emit(on_event, **txn_row_event(txn, "Failed", str(exc)))
+        _emit(on_event, kind="done", message=str(exc), counts=db.counts())
+        return result
+
+    for txn in missing:
+        db.mark(txn.transaction_id, "copied", "Restored missing row to Google Sheets")
+        result.copied += 1
+        _emit(
+            on_event,
+            **txn_row_event(txn, "Copied", _row_detail(txn, "Missing row restored to Google Sheets")),
+        )
+    restored_ids = {txn.transaction_id for txn in missing}
+    if day not in {"", "All dates"}:
+        sheet_count = len(by_date.get(day, set()) | restored_ids)
+    else:
+        sheet_count = len(existing_ids | restored_ids)
+    _emit(
+        on_event,
+        kind="sheet_tally",
+        date=day,
+        gui_count=len(candidates),
+        sheet_count=sheet_count,
+        missing=0,
+    )
+    _emit(
+        on_event,
+        kind="log",
+        message=(
+            f"Restored {result.copied} missing row(s) for {day}. "
+            f"Google Sheet now {sheet_count} txn · GUI {len(candidates)} txn."
+        ),
+    )
+    _emit(
+        on_event,
+        kind="done",
+        message=f"Sync complete for {day}. restored={result.copied}",
+        counts=db.counts(),
+    )
+    return result

@@ -9,6 +9,7 @@ from src.mapper import (
     normalize_status,
     record_local_datetime,
     to_sheet_row,
+    txn_local_date,
 )
 from src.models import Transaction
 
@@ -52,6 +53,10 @@ class MapperTests(unittest.TestCase):
             record_local_datetime("2026-08-30 15:04:01", "2026-08-29 10:44"),
             "2026-08-30 15:04:01",
         )
+        self.assertEqual(
+            txn_local_date(Transaction(transaction_id="1", created="2026-08-30 15:04")),
+            "2026-08-30",
+        )
 
     def test_sheet_row_mapping(self) -> None:
         settings = _settings()
@@ -71,7 +76,7 @@ class MapperTests(unittest.TestCase):
             [
                 "28",
                 "2026-08-28 23:30",
-                "ANZPLUS O'NEILL R W",
+                "",
                 "Caleb William Needham",
                 "30",
                 "Deposit",

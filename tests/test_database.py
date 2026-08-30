@@ -4,6 +4,7 @@ from pathlib import Path
 
 from src.database import GatheringDB
 from src.models import Transaction
+from src.pipeline import transactions_for_date
 
 
 class GatheringDBTests(unittest.TestCase):
@@ -32,6 +33,26 @@ class GatheringDBTests(unittest.TestCase):
         self.db.mark("17110853301", "failed", "429")
         self.assertEqual(self.db.reset_to_pending(["17110853301"]), 1)
         self.assertEqual(self.db.counts()["pending"], 1)
+
+    def test_transactions_for_date(self) -> None:
+        self.db.ingest(
+            [
+                Transaction(
+                    transaction_id="17110853310",
+                    amount="20",
+                    datetime="2026-08-30 10:00",
+                    status="DEPOSIT",
+                ),
+                Transaction(
+                    transaction_id="17110853311",
+                    amount="15",
+                    datetime="2026-08-29 10:00",
+                    status="WITHDRAW",
+                ),
+            ]
+        )
+        today = transactions_for_date(self.db, "2026-08-30")
+        self.assertEqual([row.transaction_id for row in today], ["17110853310"])
 
 
 if __name__ == "__main__":
