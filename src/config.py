@@ -1,0 +1,163 @@
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+from src.errors import ConfigError
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def persist_env_values(updates: dict[str, str]) -> None:
+    env_path = ROOT / ".env"
+    if not env_path.exists():
+        env_path.write_text(
+            "".join(f"{key}={value}\n" for key, value in updates.items()),
+            encoding="utf-8",
+        )
+        return
+    lines = env_path.read_text(encoding="utf-8").splitlines()
+    seen: set[str] = set()
+    for index, line in enumerate(lines):
+        for key, value in updates.items():
+            if line.startswith(f"{key}="):
+                lines[index] = f"{key}={value}"
+                seen.add(key)
+    for key, value in updates.items():
+        if key not in seen:
+            lines.append(f"{key}={value}")
+    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _load_env() -> None:
+    load_dotenv(ROOT / ".env")
+    if os.name == "nt":
+        browsers = Path.home() / "AppData" / "Local" / "ms-playwright"
+        if browsers.exists():
+            os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(browsers)
+
+
+def _bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    return int(raw) if raw else default
+
+
+def _path(name: str, default: str) -> Path:
+    raw = os.getenv(name, default).strip()
+    path = Path(raw)
+    return path if path.is_absolute() else ROOT / path
+
+
+def _aliases(raw: str) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for part in raw.split(","):
+        if ":" not in part:
+            continue
+        source, dest = part.split(":", 1)
+        mapping[source.strip().upper()] = dest.strip()
+    return mapping
+
+
+@dataclass
+class Settings:
+    dashboard_url: str
+    dashboard_username: str
+    dashboard_password: str
+    dashboard_2fa: str
+    manual_login_seconds: int
+    filter_date_from: str
+    filter_date_to: str
+    filter_type: str
+    filter_status: str
+    google_sheet_id: str
+    google_worksheet: str
+    google_credentials_path: Path
+    default_bank_account: str
+    default_brand: str
+    default_staff_code: str
+    brand_aliases: dict[str, str] = field(default_factory=dict)
+    allowed_brands: tuple[str, ...] = (
+        "POKIESPARK",
+        "FUCKSPIN",
+        "JOINTMATE",
+        "HITMATE88",
+        "AUZBETS",
+        "WEMETH",
+    )
+    headed: bool = True
+    slow_mo_ms: int = 0
+    max_pages: int = 50
+    poll_interval_seconds: int = 60
+    use_open_browser: bool = True
+    auth_state_path: Path = ROOT / "auth_state.json"
+    database_path: Path = ROOT / "data" / "gathering.db"
+
+    @classmethod
+    def load(cls) -> Settings:
+        _load_env()
+        return cls(
+            dashboard_url=os.getenv("DASHBOARD_URL", "").strip(),
+            dashboard_username=os.getenv("DASHBOARD_USERNAME", "").strip(),
+            dashboard_password=os.getenv("DASHBOARD_PASSWORD", "").strip(),
+            dashboard_2fa=os.getenv("DASHBOARD_2FA", "").strip(),
+            manual_login_seconds=_int("MANUAL_LOGIN_SECONDS", 0),
+            filter_date_from=os.getenv("FILTER_DATE_FROM", "").strip(),
+            filter_date_to=os.getenv("FILTER_DATE_TO", "").strip(),
+            filter_type=os.getenv("FILTER_TYPE", "ACTIVE").strip(),
+            filter_status=os.getenv("FILTER_STATUS", "COMPLETED").strip(),
+            google_sheet_id=os.getenv("GOOGLE_SHEET_ID", "").strip(),
+            google_worksheet=os.getenv("GOOGLE_WORKSHEET", "").strip(),
+            google_credentials_path=_path(
+                "GOOGLE_CREDENTIALS_PATH", "credentials/service-account.json"
+            ),
+            default_bank_account=os.getenv(
+                "DEFAULT_BANK_ACCOUNT", "ANZPLUS O'NEILL R W"
+            ).strip(),
+            default_brand=os.getenv("DEFAULT_BRAND", "FUCKSPIN").strip(),
+            default_staff_code=os.getenv("DEFAULT_STAFF_CODE", "SL0017").strip(),
+            brand_aliases=_aliases(
+                os.getenv("BRAND_ALIASES", "FUCKSPINVIPA:FUCKSPIN,FUCKSPINVIPC:FUCKSPIN")
+            ),
+            allowed_brands=tuple(
+                part.strip().upper()
+                for part in os.getenv(
+                    "ALLOWED_BRANDS",
+                    "POKIESPARK,FUCKSPIN,JOINTMATE,HITMATE88,AUZBETS,WEMETH",
+                ).split(",")
+                if part.strip()
+            ),
+            headed=_bool("HEADED", True),
+            slow_mo_ms=_int("SLOW_MO_MS", 0),
+            max_pages=_int("MAX_PAGES", 50),
+            poll_interval_seconds=_int("POLL_INTERVAL_SECONDS", 60),
+            use_open_browser=_bool("USE_OPEN_BROWSER", False),
+        )
+
+    def require_dashboard(self) -> None:
+        if not self.dashboard_url and not self.use_open_browser:
+            raise ConfigError(
+                "No dashboard source. Open the admin site in Chrome or set DASHBOARD_URL."
+            )
+
+    def require_sheets(self) -> None:
+        missing = []
+        if not self.google_sheet_id:
+            missing.append("GOOGLE_SHEET_ID")
+        if not self.google_credentials_path.exists():
+            missing.append(
+                f"service account file at {self.google_credentials_path}"
+            )
+        if missing:
+            raise ConfigError(
+                "Google Sheets is not configured. Missing: " + ", ".join(missing)
+            )

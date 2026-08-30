@@ -1,0 +1,13 @@
+.venv/
+.env
+credentials.json
+credentials/
+auth_state.json
+.playwright-profile/
+__pycache__/
+*.pyc
+.pytest_cache/
+.playwright-mcp/
+*.log
+data/*.db
+data/*.db-journal
