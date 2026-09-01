@@ -14,6 +14,7 @@ from src.mapper import (
     record_local_datetime,
     sheet_amount,
     sheet_status,
+    sheet_tab_name,
     to_sheet_row,
     txn_local_date,
 )
@@ -47,6 +48,13 @@ class MapperTests(unittest.TestCase):
             clean_name("[JKFCKSPNAU] Caleb William Needham"),
             "Caleb William Needham",
         )
+
+    def test_sheet_tab_name_uses_day_number(self) -> None:
+        self.assertEqual(sheet_tab_name("2026-08-29"), "29")
+        self.assertEqual(sheet_tab_name("2026-08-09"), "9")
+        self.assertEqual(sheet_tab_name("29"), "29")
+        self.assertEqual(sheet_tab_name("09"), "9")
+        self.assertEqual(sheet_tab_name(""), "")
 
     def test_day_and_status(self) -> None:
         self.assertEqual(day_from_datetime("2026-08-28 23:30"), "28")
@@ -134,7 +142,7 @@ class MapperTests(unittest.TestCase):
             [
                 "28",
                 "2026-08-28 23:30",
-                "ANZPLUS O'NEILL R W",
+                "",
                 "Timothy David Evans",
                 "-530.27",
                 "Withdraw",
@@ -162,6 +170,8 @@ class MapperTests(unittest.TestCase):
         self.assertEqual(row[SHEET_COL_STAFF], deposit[SHEET_COL_STAFF])
         self.assertEqual(row[SHEET_COL_PLAYER], "A51088178")
         self.assertEqual(deposit[SHEET_COL_PLAYER], "A1")
+        self.assertEqual(row[2], "")
+        self.assertEqual(deposit[2], "ANZPLUS O'NEILL R W")
         self.assertEqual(sheet_status("WITHDRAWAL"), "Withdraw")
         self.assertEqual(sheet_amount("50", "WITHDRAW"), "-50")
         self.assertEqual(sheet_amount("-50", "WITHDRAWAL"), "-50")

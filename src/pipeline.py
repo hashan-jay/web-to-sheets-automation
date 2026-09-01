@@ -5,7 +5,6 @@ from dataclasses import dataclass
 
 from src.config import Settings
 from src.database import GatheringDB, _transaction_from_payload
-from src.errors import ConfigError
 from src.mapper import clean_name, resolve_brand, to_sheet_row, txn_local_date
 from src.models import Transaction
 from src.scraper import scrape_transactions
@@ -153,36 +152,8 @@ def copy_pending_to_sheet(
         _emit(on_event, kind="log", message="No pending notifications in the gathering database.")
         return result
 
-    existing_ids: set[str] = set()
-    sheet: SheetClient | None = None
-    if not dry_run:
-        settings.require_sheets()
-        sheet = SheetClient(
-            settings.google_credentials_path,
-            settings.google_sheet_id,
-            settings.google_worksheet,
-        )
-        existing_ids = sheet.existing_ids()
-
-    to_copy = pending if dry_run else new_rows_only(pending, existing_ids)
-    skipped_ids = {txn.transaction_id for txn in pending} - {
-        txn.transaction_id for txn in to_copy
-    }
-    for txn_id in skipped_ids:
-        db.mark(txn_id, "skipped", "Already on the Google Sheet")
-        result.skipped += 1
-        _emit(
-            on_event,
-            kind="row",
-            transaction_id=txn_id,
-            name="",
-            amount="",
-            status="Skipped",
-            detail="Already on the Google Sheet",
-        )
-
     if dry_run:
-        for txn in to_copy:
+        for txn in pending:
             result.previewed += 1
             _emit(
                 on_event,
@@ -194,26 +165,14 @@ def copy_pending_to_sheet(
             )
         return result
 
-    assert sheet is not None
-    rows = [to_sheet_row(txn, settings) for txn in to_copy]
-    for txn in to_copy:
-        _emit(on_event, **txn_row_event(txn, "Copying", _row_detail(txn, "Writing row to Google Sheets")))
-    try:
-        sheet.write_rows(rows)
-    except Exception as exc:
-        for txn in to_copy:
-            db.mark(txn.transaction_id, "failed", str(exc))
-            result.failed += 1
-            _emit(on_event, **txn_row_event(txn, "Failed", str(exc)))
-        return result
-
-    for txn in to_copy:
-        db.mark(txn.transaction_id, "copied", "Copied to Google Sheets")
-        result.copied += 1
-        _emit(
-            on_event,
-            **txn_row_event(txn, "Copied", _row_detail(txn, "Row appended to Google Sheets")),
-        )
+    settings.require_sheets()
+    sheet = SheetClient(
+        settings.google_credentials_path,
+        settings.google_sheet_id,
+        settings.google_worksheet,
+    )
+    for day, txns in _group_by_day(pending, settings.filter_date_from).items():
+        _write_day_rows(settings, db, sheet, day, txns, result, on_event, action="Copied")
     return result
 
 
@@ -327,81 +286,13 @@ def sync_date_to_sheet(
         settings.google_sheet_id,
         settings.google_worksheet,
     )
-    existing_ids, by_date = sheet.id_index()
-    missing = new_rows_only(candidates, existing_ids)
-    sheet_count = len(by_date.get(day, set())) if day not in {"", "All dates"} else len(existing_ids)
-    _emit(
-        on_event,
-        kind="sheet_tally",
-        date=day,
-        gui_count=len(candidates),
-        sheet_count=sheet_count,
-        missing=len(missing),
+    groups = (
+        _group_by_day(candidates, settings.filter_date_from)
+        if day in {"", "All dates"}
+        else {day: candidates}
     )
-    _emit(
-        on_event,
-        kind="log",
-        message=(
-            f"Sync {day}: GUI {len(candidates)} txn · "
-            f"Google Sheet {sheet_count} txn · missing {len(missing)}."
-        ),
-    )
-    if not missing:
-        _emit(
-            on_event,
-            kind="log",
-            message=(
-                f"Google Sheet already has every GUI record for {day}. "
-                "Nothing else to restore."
-            ),
-        )
-        _emit(on_event, kind="done", message=f"Sync complete for {day}. missing=0", counts=db.counts())
-        return result
-
-    rows = [to_sheet_row(txn, settings) for txn in missing]
-    for txn in missing:
-        _emit(
-            on_event,
-            **txn_row_event(txn, "Copying", _row_detail(txn, "Restoring missing row to Google Sheets")),
-        )
-    try:
-        sheet.write_rows(rows)
-    except Exception as exc:
-        for txn in missing:
-            db.mark(txn.transaction_id, "failed", str(exc))
-            result.failed += 1
-            _emit(on_event, **txn_row_event(txn, "Failed", str(exc)))
-        _emit(on_event, kind="done", message=str(exc), counts=db.counts())
-        return result
-
-    for txn in missing:
-        db.mark(txn.transaction_id, "copied", "Restored missing row to Google Sheets")
-        result.copied += 1
-        _emit(
-            on_event,
-            **txn_row_event(txn, "Copied", _row_detail(txn, "Missing row restored to Google Sheets")),
-        )
-    restored_ids = {txn.transaction_id for txn in missing}
-    if day not in {"", "All dates"}:
-        sheet_count = len(by_date.get(day, set()) | restored_ids)
-    else:
-        sheet_count = len(existing_ids | restored_ids)
-    _emit(
-        on_event,
-        kind="sheet_tally",
-        date=day,
-        gui_count=len(candidates),
-        sheet_count=sheet_count,
-        missing=0,
-    )
-    _emit(
-        on_event,
-        kind="log",
-        message=(
-            f"Restored {result.copied} missing row(s) for {day}. "
-            f"Google Sheet now {sheet_count} txn · GUI {len(candidates)} txn."
-        ),
-    )
+    for one_day, txns in groups.items():
+        _sync_one_day(settings, db, sheet, one_day, txns, result, on_event)
     _emit(
         on_event,
         kind="done",
@@ -409,3 +300,147 @@ def sync_date_to_sheet(
         counts=db.counts(),
     )
     return result
+
+
+def _group_by_day(transactions: list[Transaction], fallback: str) -> dict[str, list[Transaction]]:
+    groups: dict[str, list[Transaction]] = {}
+    for txn in transactions:
+        record_day = txn_local_date(txn) or fallback
+        groups.setdefault(record_day, []).append(txn)
+    return groups
+
+
+def _write_day_rows(
+    settings: Settings,
+    db: GatheringDB,
+    sheet: SheetClient,
+    day: str,
+    txns: list[Transaction],
+    result: PipelineResult,
+    on_event: EventFn | None,
+    action: str,
+) -> None:
+    try:
+        sheet.use_day(day)
+    except Exception as exc:
+        for txn in txns:
+            db.mark(txn.transaction_id, "failed", str(exc))
+            result.failed += 1
+            _emit(on_event, **txn_row_event(txn, "Failed", str(exc)))
+        return
+    existing_ids = sheet.existing_ids()
+    to_copy = new_rows_only(txns, existing_ids)
+    skipped_ids = {txn.transaction_id for txn in txns} - {
+        txn.transaction_id for txn in to_copy
+    }
+    for txn_id in skipped_ids:
+        db.mark(txn_id, "skipped", f"Already on Google Sheet tab {sheet.tab_title()}")
+        result.skipped += 1
+        _emit(
+            on_event,
+            kind="row",
+            transaction_id=txn_id,
+            name="",
+            amount="",
+            status="Skipped",
+            detail=f"Already on Google Sheet tab {sheet.tab_title()}",
+        )
+    if not to_copy:
+        return
+    _emit(
+        on_event,
+        kind="log",
+        message=f"Writing {len(to_copy)} row(s) to Google Sheet tab {sheet.tab_title()}.",
+    )
+    rows = [to_sheet_row(txn, settings) for txn in to_copy]
+    for txn in to_copy:
+        _emit(
+            on_event,
+            **txn_row_event(
+                txn,
+                "Copying",
+                _row_detail(txn, f"Writing row to Google Sheet tab {sheet.tab_title()}"),
+            ),
+        )
+    try:
+        sheet.write_rows(rows)
+    except Exception as exc:
+        for txn in to_copy:
+            db.mark(txn.transaction_id, "failed", str(exc))
+            result.failed += 1
+            _emit(on_event, **txn_row_event(txn, "Failed", str(exc)))
+        return
+    detail = (
+        f"Row appended to Google Sheet tab {sheet.tab_title()}"
+        if action == "Copied"
+        else f"Missing row restored to Google Sheet tab {sheet.tab_title()}"
+    )
+    for txn in to_copy:
+        db.mark(txn.transaction_id, "copied", detail)
+        result.copied += 1
+        _emit(on_event, **txn_row_event(txn, "Copied", _row_detail(txn, detail)))
+
+
+def _sync_one_day(
+    settings: Settings,
+    db: GatheringDB,
+    sheet: SheetClient,
+    day: str,
+    txns: list[Transaction],
+    result: PipelineResult,
+    on_event: EventFn | None,
+) -> None:
+    try:
+        sheet.use_day(day)
+    except Exception as exc:
+        _emit(on_event, kind="log", message=f"Sync {day} failed: {exc}")
+        for txn in txns:
+            db.mark(txn.transaction_id, "failed", str(exc))
+            result.failed += 1
+            _emit(on_event, **txn_row_event(txn, "Failed", str(exc)))
+        return
+    existing_ids, _by_date = sheet.id_index()
+    missing = new_rows_only(txns, existing_ids)
+    sheet_count = len(existing_ids)
+    _emit(
+        on_event,
+        kind="sheet_tally",
+        date=day,
+        gui_count=len(txns),
+        sheet_count=sheet_count,
+        missing=len(missing),
+    )
+    _emit(
+        on_event,
+        kind="log",
+        message=(
+            f"Sync {day} → tab {sheet.tab_title()}: GUI {len(txns)} txn · "
+            f"Google Sheet {sheet_count} txn · missing {len(missing)}."
+        ),
+    )
+    if not missing:
+        _emit(
+            on_event,
+            kind="log",
+            message=f"Google Sheet tab {sheet.tab_title()} already has every GUI record for {day}.",
+        )
+        return
+    before = result.copied
+    _write_day_rows(settings, db, sheet, day, missing, result, on_event, action="Restored")
+    restored = result.copied - before
+    _emit(
+        on_event,
+        kind="sheet_tally",
+        date=day,
+        gui_count=len(txns),
+        sheet_count=sheet_count + restored,
+        missing=0,
+    )
+    _emit(
+        on_event,
+        kind="log",
+        message=(
+            f"Restored {restored} missing row(s) for {day} on tab {sheet.tab_title()}. "
+            f"Google Sheet now {sheet_count + restored} txn · GUI {len(txns)} txn."
+        ),
+    )

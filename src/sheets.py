@@ -6,15 +6,55 @@ from pathlib import Path
 import gspread
 from gspread.exceptions import APIError
 
-from src.mapper import date_key, pad_sheet_row
+from src.errors import ConfigError
+from src.mapper import date_key, pad_sheet_row, sheet_tab_name
 from src.models import Transaction
+
+
+def day_tab_candidates(day_number: str) -> list[str]:
+    number = str(int(day_number))
+    names = [number]
+    padded = number.zfill(2)
+    if padded not in names:
+        names.append(padded)
+    return names
+
+
+def find_day_worksheet(spreadsheet, day_number: str):
+    wanted = {name.lower() for name in day_tab_candidates(day_number)}
+    for worksheet in spreadsheet.worksheets():
+        if worksheet.title.strip().lower() in wanted:
+            return worksheet
+    return None
 
 
 class SheetClient:
     def __init__(self, credentials_path: Path, sheet_id: str, worksheet: str = "") -> None:
         client = gspread.service_account(filename=str(credentials_path))
-        spreadsheet = client.open_by_key(sheet_id)
-        self.ws = spreadsheet.worksheet(worksheet) if worksheet else spreadsheet.sheet1
+        self.spreadsheet = client.open_by_key(sheet_id)
+        self._fallback_title = (worksheet or "").strip()
+        if self._fallback_title:
+            self.ws = self.spreadsheet.worksheet(self._fallback_title)
+        else:
+            self.ws = self.spreadsheet.sheet1
+
+    def use_day(self, day: str):
+        tab = sheet_tab_name(day)
+        if not tab:
+            if self._fallback_title:
+                self.ws = self.spreadsheet.worksheet(self._fallback_title)
+                return self.ws
+            raise ConfigError("Cannot choose a Google Sheet tab: the transaction has no date.")
+        found = find_day_worksheet(self.spreadsheet, tab)
+        if found:
+            self.ws = found
+            return self.ws
+        title = day_tab_candidates(tab)[0]
+        self.ws = self.spreadsheet.add_worksheet(title=title, rows=2000, cols=16)
+        return self.ws
+
+    def tab_title(self) -> str:
+        return self.ws.title
 
     def existing_ids(self) -> set[str]:
         ids, _by_date = self.id_index()

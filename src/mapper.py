@@ -59,6 +59,17 @@ def date_key(raw: object) -> str:
     return match.group(1) if match else ""
 
 
+def sheet_tab_name(raw: object) -> str:
+    """Google Sheet tab title for a date, e.g. 2026-08-29 -> '29'."""
+    key = date_key(raw)
+    if key:
+        return str(int(key.split("-")[2]))
+    text = str(raw or "").strip()
+    if text.isdigit():
+        return str(int(text))
+    return day_from_datetime(text)
+
+
 def txn_local_date(txn: Transaction) -> str:
     stamped = date_key((txn.extras or {}).get("tally_date"))
     if stamped:
@@ -114,6 +125,8 @@ def sheet_amount(amount: object, status: object) -> str:
 
 
 def sheet_bank(txn: Transaction, settings: Settings) -> str:
+    if is_withdraw(txn.status):
+        return ""
     return (settings.default_bank_account or txn.bank or "").strip()
 
 

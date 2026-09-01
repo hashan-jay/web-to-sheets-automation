@@ -88,7 +88,7 @@ STATUS_RANK = {
 
 from src.config import Settings, persist_env_values
 from src.database import GatheringDB, _transaction_from_payload
-from src.mapper import record_local_datetime
+from src.mapper import record_local_datetime, sheet_tab_name
 from src.pipeline import (
     process_new_notifications_only,
     run_pipeline,
@@ -170,8 +170,8 @@ class FinanceAutomationApp:
         self._append_log("GUI ready. Open a section on the right. Run now only scrapes.")
         self._append_log("Send deposits or withdrawals from those sections after you tally the rows.")
         self._append_log(
-            "Both types write brand in Company Owner / Company Name. "
-            "Withdrawals use a minus amount and leave Company TRF blank for the dropdown."
+            "Send and Sync write each date to the Google Sheet tab with that day number "
+            "(29th transactions go to tab 29)."
         )
         self._bind_shortcuts()
         self.root.after(120, self._drain_events)
@@ -590,7 +590,7 @@ class FinanceAutomationApp:
         ).pack(side="left")
         ttk.Label(
             page,
-            text="Today's sent rows by default. Sync restores any selected-date rows that were deleted from the Google Sheet.",
+            text="Today's sent rows by default. Sync writes the selected date to the matching day tab (29 → sheet 29).",
             style="Muted.TLabel",
         ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 0))
         self.sent_tree = self._make_tree(page, "sent", ALL_COLUMNS, "ID Transaction")
@@ -885,9 +885,9 @@ class FinanceAutomationApp:
         settings = self._current_settings()
         self.status_text.set("Syncing Google Sheet...")
         self.open_sent_after_send = True
+        tab = sheet_tab_name(day) or day
         self._append_log(
-            f"Checking Google Sheet against GUI records for {day}, "
-            "then restoring any missing rows."
+            f"Syncing GUI records for {day} to Google Sheet tab {tab}."
         )
 
         def work() -> None:
