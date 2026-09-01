@@ -1,5 +1,6 @@
 import unittest
 
+from src.mapper import SHEET_COL_COUNT, pad_sheet_row
 from src.models import Transaction
 from src.sheets import bank_clear_range, index_sheet_ids, new_rows_only
 
@@ -20,6 +21,14 @@ class SheetDedupeTests(unittest.TestCase):
         self.assertEqual(all_ids, {"17110853300", "17110853301", "17110853302"})
         self.assertEqual(by_date["2026-08-30"], {"17110853300", "17110853302"})
         self.assertEqual(by_date["2026-08-29"], {"17110853301"})
+
+    def test_pad_sheet_row_keeps_staff_in_last_column(self) -> None:
+        padded = pad_sheet_row(["30", "date", "bank"])
+        self.assertEqual(len(padded), SHEET_COL_COUNT)
+        self.assertEqual(padded[11], "")
+        full = pad_sheet_row(["1", "2", "3", "4", "5", "6", "7", "brand", "", "player", "", "staff"])
+        self.assertEqual(full[9], "player")
+        self.assertEqual(full[11], "staff")
 
     def test_bank_clear_range_skips_header(self) -> None:
         start, end = bank_clear_range(["ID", "17110853300", "17110853301"])

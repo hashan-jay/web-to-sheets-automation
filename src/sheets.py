@@ -6,7 +6,7 @@ from pathlib import Path
 import gspread
 from gspread.exceptions import APIError
 
-from src.mapper import date_key
+from src.mapper import date_key, pad_sheet_row
 from src.models import Transaction
 
 
@@ -64,13 +64,15 @@ class SheetClient:
     def write_rows(self, rows: list[list[str]]) -> int:
         if not rows:
             return 0
+        values = [pad_sheet_row(row) for row in rows]
         last_error: Exception | None = None
         for attempt in range(4):
             try:
                 start = self.next_empty_row()
+                end = start + len(values) - 1
                 self.ws.update(
-                    range_name=f"A{start}",
-                    values=rows,
+                    range_name=f"A{start}:L{end}",
+                    values=values,
                     value_input_option="USER_ENTERED",
                 )
                 return len(rows)

@@ -3,6 +3,10 @@ from pathlib import Path
 
 from src.config import Settings
 from src.mapper import (
+    SHEET_COL_COMPANY,
+    SHEET_COL_COUNT,
+    SHEET_COL_PLAYER,
+    SHEET_COL_STAFF,
     clean_name,
     day_from_datetime,
     normalize_brand,
@@ -96,6 +100,7 @@ class MapperTests(unittest.TestCase):
                 "FUCKSPIN",
                 "",
                 "A10603620",
+                "",
                 "SL0017",
             ],
         )
@@ -137,9 +142,26 @@ class MapperTests(unittest.TestCase):
                 "FUCKSPIN",
                 "",
                 "A51088178",
+                "",
                 "SL0017",
             ],
         )
+        deposit = to_sheet_row(
+            Transaction(
+                transaction_id="1",
+                username="A1",
+                amount="10",
+                status="DEPOSIT",
+                brand="FUCKSPIN",
+            ),
+            settings,
+        )
+        self.assertEqual(len(row), SHEET_COL_COUNT)
+        self.assertEqual(len(deposit), SHEET_COL_COUNT)
+        self.assertEqual(row[SHEET_COL_COMPANY], deposit[SHEET_COL_COMPANY])
+        self.assertEqual(row[SHEET_COL_STAFF], deposit[SHEET_COL_STAFF])
+        self.assertEqual(row[SHEET_COL_PLAYER], "A51088178")
+        self.assertEqual(deposit[SHEET_COL_PLAYER], "A1")
         self.assertEqual(sheet_status("WITHDRAWAL"), "Withdraw")
         self.assertEqual(sheet_amount("50", "WITHDRAW"), "-50")
         self.assertEqual(sheet_amount("-50", "WITHDRAWAL"), "-50")

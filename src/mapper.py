@@ -121,28 +121,49 @@ def sheet_description(txn: Transaction) -> str:
     return clean_name(txn.bank_account_name or txn.name)
 
 
+# Fixed A-L cashbook. Blank I and K hold Company TRF / unused so Staff stays in L.
+SHEET_COL_COUNT = 12
+SHEET_COL_DAY = 0
+SHEET_COL_DATE = 1
+SHEET_COL_BANK = 2
+SHEET_COL_DESCRIPTION = 3
+SHEET_COL_AMOUNT = 4
+SHEET_COL_STATUS = 5
+SHEET_COL_ID = 6
+SHEET_COL_COMPANY = 7
+SHEET_COL_COMPANY_TRF = 8
+SHEET_COL_PLAYER = 9
+SHEET_COL_UNUSED = 10
+SHEET_COL_STAFF = 11
+
+
+def empty_sheet_row() -> list[str]:
+    return [""] * SHEET_COL_COUNT
+
+
+def pad_sheet_row(row: list[str]) -> list[str]:
+    padded = list(row) + [""] * (SHEET_COL_COUNT - len(row))
+    return padded[:SHEET_COL_COUNT]
+
+
 def to_sheet_row(txn: Transaction, settings: Settings) -> list[str]:
-    """Write only the cashbook fields for this category; leave the rest blank.
+    """Write deposit and withdraw onto the same A-L columns.
 
     A DAY | B DATE | C BANK | D DESCRIPTION | E AMOUNT | F STATUS | G ID |
-    H COMPANY OWNER / COMPANY NAME | I COMPANY TRF | J PLAYER | K STAFF
+    H COMPANY OWNER / COMPANY NAME | I COMPANY TRF | J PLAYER | K *(blank)* | L STAFF
     """
     when = record_local_datetime(txn.datetime, txn.created, txn.processed)
-    brand = normalize_brand(txn.brand, settings)
-    bank = sheet_bank(txn, settings)
-    description = sheet_description(txn)
-    player = (txn.username or "").strip()
-    staff = settings.default_staff_code
-    return [
-        day_from_datetime(when),
-        when,
-        bank,
-        description,
-        sheet_amount(txn.amount, txn.status),
-        sheet_status(txn.status),
-        txn.transaction_id,
-        brand,
-        "",
-        player,
-        staff,
-    ]
+    row = empty_sheet_row()
+    row[SHEET_COL_DAY] = day_from_datetime(when)
+    row[SHEET_COL_DATE] = when
+    row[SHEET_COL_BANK] = sheet_bank(txn, settings)
+    row[SHEET_COL_DESCRIPTION] = sheet_description(txn)
+    row[SHEET_COL_AMOUNT] = sheet_amount(txn.amount, txn.status)
+    row[SHEET_COL_STATUS] = sheet_status(txn.status)
+    row[SHEET_COL_ID] = txn.transaction_id
+    row[SHEET_COL_COMPANY] = normalize_brand(txn.brand, settings)
+    row[SHEET_COL_COMPANY_TRF] = ""
+    row[SHEET_COL_PLAYER] = (txn.username or "").strip()
+    row[SHEET_COL_UNUSED] = ""
+    row[SHEET_COL_STAFF] = settings.default_staff_code
+    return row
