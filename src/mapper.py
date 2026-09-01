@@ -178,5 +178,5 @@ def to_sheet_row(txn: Transaction, settings: Settings) -> list[str]:
     row[SHEET_COL_COMPANY_TRF] = ""
     row[SHEET_COL_PLAYER] = (txn.username or "").strip()
     row[SHEET_COL_UNUSED] = ""
-    row[SHEET_COL_STAFF] = settings.default_staff_code
+    row[SHEET_COL_STAFF] = ""
     return row

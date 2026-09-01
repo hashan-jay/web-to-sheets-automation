@@ -109,7 +109,7 @@ class MapperTests(unittest.TestCase):
                 "",
                 "A10603620",
                 "",
-                "SL0017",
+                "",
             ],
         )
         self.assertEqual(sheet_status("DEPOSIT"), "Deposit")
@@ -151,7 +151,7 @@ class MapperTests(unittest.TestCase):
                 "",
                 "A51088178",
                 "",
-                "SL0017",
+                "",
             ],
         )
         deposit = to_sheet_row(

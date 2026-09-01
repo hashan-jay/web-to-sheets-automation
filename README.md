@@ -72,9 +72,9 @@ Rows are written by category. Only the listed cells are filled; the other column
 | | A | B | C | D | E | F | G | H | I | J | K | L |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 | Header | Day | Date | Bank | Description | Amount | Status | ID | Company Owner / Company Name | Company TRF | Player | | Staff |
-| Deposit | day | datetime | company bank | player name | amount | Deposit | ID | brand | | username | | staff |
-| Withdraw | day | datetime | *(blank, user selects)* | player name | **-amount** | Withdraw | ID | brand | *(blank, user selects)* | username | | staff |
+| Deposit | day | datetime | company bank | player name | amount | Deposit | ID | brand | | username | | *(blank, user selects)* |
+| Withdraw | day | datetime | *(blank, user selects)* | player name | **-amount** | Withdraw | ID | brand | *(blank, user selects)* | username | | *(blank, user selects)* |
 
-Column G is the duplicate key. Existing IDs are skipped. Withdrawal amounts are stored as negatives so the sheet can sum them. Company TRF is left blank for the dropdown. Bank is filled for deposits and left blank on withdrawals.
+Column G is the duplicate key. Existing IDs are skipped. Withdrawal amounts are stored as negatives so the sheet can sum them. Company TRF and Staff are left blank for the dropdowns. Bank is filled for deposits and left blank on withdrawals.
 
 Send and Sync write each transaction to the Google Sheet tab named with that day number. A 29th-date row goes to the tab titled `29`.
