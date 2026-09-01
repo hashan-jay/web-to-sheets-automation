@@ -170,9 +170,8 @@ class FinanceAutomationApp:
         self._append_log("GUI ready. Open a section on the right. Run now only scrapes.")
         self._append_log("Send deposits or withdrawals from those sections after you tally the rows.")
         self._append_log(
-            "Deposits write Day, Date, Bank, Description, Amount, Status=Deposit, ID, "
-            "Company Owner, Player, Staff. Withdrawals write Day, Bank, Description, "
-            "minus Amount, Status=Withdraw, ID, Company Name, blank Company TRF, Player, Staff."
+            "Both types write brand in Company Owner / Company Name. "
+            "Withdrawals use a minus amount and leave Company TRF blank for the dropdown."
         )
         self._bind_shortcuts()
         self.root.after(120, self._drain_events)

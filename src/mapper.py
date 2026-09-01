@@ -125,7 +125,7 @@ def to_sheet_row(txn: Transaction, settings: Settings) -> list[str]:
     """Write only the cashbook fields for this category; leave the rest blank.
 
     A DAY | B DATE | C BANK | D DESCRIPTION | E AMOUNT | F STATUS | G ID |
-    H COMPANY OWNER | I COMPANY NAME | J COMPANY TRF | K PLAYER | L STAFF
+    H COMPANY OWNER / COMPANY NAME | I COMPANY TRF | J PLAYER | K STAFF
     """
     when = record_local_datetime(txn.datetime, txn.created, txn.processed)
     brand = normalize_brand(txn.brand, settings)
@@ -133,31 +133,15 @@ def to_sheet_row(txn: Transaction, settings: Settings) -> list[str]:
     description = sheet_description(txn)
     player = (txn.username or "").strip()
     staff = settings.default_staff_code
-    if is_withdraw(txn.status):
-        return [
-            day_from_datetime(when),
-            when,
-            bank,
-            description,
-            sheet_amount(txn.amount, txn.status),
-            "Withdraw",
-            txn.transaction_id,
-            "",
-            brand,
-            "",
-            player,
-            staff,
-        ]
     return [
         day_from_datetime(when),
         when,
         bank,
         description,
         sheet_amount(txn.amount, txn.status),
-        "Deposit",
+        sheet_status(txn.status),
         txn.transaction_id,
         brand,
-        "",
         "",
         player,
         staff,

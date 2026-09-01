@@ -69,10 +69,10 @@ Useful flags:
 
 Rows are written by category. Only the listed cells are filled; the other columns stay blank.
 
-| | A | B | C | D | E | F | G | H | I | J | K | L |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| Header | Day | Date | Bank | Description | Amount | Status | ID | Company Owner | Company Name | Company TRF | Player | Staff |
-| Deposit | day | datetime | company bank | player name | amount | Deposit | ID | brand | | | username | staff |
-| Withdraw | day | datetime | company bank | player name | **-amount** | Withdraw | ID | | brand | *(blank, user selects)* | username | staff |
+| | A | B | C | D | E | F | G | H | I | J | K |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| Header | Day | Date | Bank | Description | Amount | Status | ID | Company Owner / Company Name | Company TRF | Player | Staff |
+| Deposit | day | datetime | company bank | player name | amount | Deposit | ID | brand | | username | staff |
+| Withdraw | day | datetime | company bank | player name | **-amount** | Withdraw | ID | brand | *(blank, user selects)* | username | staff |
 
 Column G is the duplicate key. Existing IDs are skipped. Withdrawal amounts are stored as negatives so the sheet can sum them. Company TRF is left blank for the dropdown.
