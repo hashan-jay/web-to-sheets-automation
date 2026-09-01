@@ -4,6 +4,9 @@ from src.tally import (
     copy_group,
     format_amount,
     parse_amount,
+    estimated_pages,
+    pager_bounds,
+    pager_last_from_hrefs,
     parse_website_summary,
     tally_rows,
     txn_kind,
@@ -35,6 +38,19 @@ class TallyTests(unittest.TestCase):
         summary = parse_website_summary("Record: 236\nTotal: -878.46")
         self.assertEqual(summary["records"], 236)
         self.assertEqual(summary["total"], "-878.46")
+
+    def test_pager_bounds_reads_last_page(self) -> None:
+        current, last = pager_bounds(["Prev", "1", "2", "...", "33", "Next"])
+        self.assertEqual(current, 1)
+        self.assertEqual(last, 33)
+
+    def test_estimated_pages(self) -> None:
+        self.assertEqual(estimated_pages(273, 8), 35)
+        self.assertEqual(estimated_pages(0, 8), 0)
+
+    def test_simple_pagination_hrefs(self) -> None:
+        last = pager_last_from_hrefs(["#page-2", "#page-28"], current=1)
+        self.assertEqual(last, 28)
 
 
 if __name__ == "__main__":

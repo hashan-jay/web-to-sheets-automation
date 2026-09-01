@@ -8,6 +8,8 @@ from src.mapper import (
     normalize_brand,
     normalize_status,
     record_local_datetime,
+    sheet_amount,
+    sheet_status,
     to_sheet_row,
     txn_local_date,
 )
@@ -57,6 +59,16 @@ class MapperTests(unittest.TestCase):
             txn_local_date(Transaction(transaction_id="1", created="2026-08-30 15:04")),
             "2026-08-30",
         )
+        self.assertEqual(
+            txn_local_date(
+                Transaction(
+                    transaction_id="2",
+                    datetime="2026-08-29 23:50",
+                    extras={"tally_date": "2026-08-30"},
+                )
+            ),
+            "2026-08-30",
+        )
 
     def test_sheet_row_mapping(self) -> None:
         settings = _settings()
@@ -76,19 +88,20 @@ class MapperTests(unittest.TestCase):
             [
                 "28",
                 "2026-08-28 23:30",
-                "",
+                "ANZPLUS O'NEILL R W",
                 "Caleb William Needham",
                 "30",
                 "Deposit",
                 "17110853300",
                 "FUCKSPIN",
                 "",
-                "A10603620",
                 "",
+                "A10603620",
                 "SL0017",
-                "2026-08-28 23:30",
             ],
         )
+        self.assertEqual(sheet_status("DEPOSIT"), "Deposit")
+        self.assertEqual(sheet_amount("30", "DEPOSIT"), "30")
         self.assertEqual(normalize_brand("", settings), "")
         self.assertEqual(normalize_brand("FUCKSPINVIPC", settings), "FUCKSPIN")
         self.assertEqual(normalize_brand("NETLOSSN", settings), "")
@@ -102,6 +115,7 @@ class MapperTests(unittest.TestCase):
             name="[JKFCKSPNAU] Timothy David Evans",
             bank_account_name="Timothy David Evans",
             amount="530.27",
+            datetime="2026-08-28 23:30",
             bank="PIPN",
             method="Manual",
             status="WITHDRAW",
@@ -111,13 +125,26 @@ class MapperTests(unittest.TestCase):
             bank_lock="1",
         )
         row = to_sheet_row(txn, settings)
-        self.assertEqual(row[3], "Timothy David Evans")
-        self.assertEqual(row[4], "530.27")
-        self.assertEqual(row[5], "Withdraw")
-        self.assertEqual(row[6], "17113600239")
-        self.assertEqual(row[8], "815000")
-        self.assertEqual(row[9], "A51088178")
-        self.assertEqual(row[10], "61414769587")
+        self.assertEqual(
+            row,
+            [
+                "28",
+                "2026-08-28 23:30",
+                "ANZPLUS O'NEILL R W",
+                "Timothy David Evans",
+                "-530.27",
+                "Withdraw",
+                "17113600239",
+                "",
+                "FUCKSPIN",
+                "",
+                "A51088178",
+                "SL0017",
+            ],
+        )
+        self.assertEqual(sheet_status("WITHDRAWAL"), "Withdraw")
+        self.assertEqual(sheet_amount("50", "WITHDRAW"), "-50")
+        self.assertEqual(sheet_amount("-50", "WITHDRAWAL"), "-50")
         self.assertEqual(normalize_status("WITHDRAW"), "Withdraw")
 
 

@@ -54,6 +54,25 @@ class GatheringDBTests(unittest.TestCase):
         today = transactions_for_date(self.db, "2026-08-30")
         self.assertEqual([row.transaction_id for row in today], ["17110853310"])
 
+    def test_ingest_updates_tally_date_on_existing(self) -> None:
+        first = Transaction(
+            transaction_id="17110853320",
+            datetime="2026-08-29 22:00",
+            extras={"tally_date": "2026-08-29"},
+        )
+        self.db.ingest([first])
+        self.db.ingest(
+            [
+                Transaction(
+                    transaction_id="17110853320",
+                    datetime="2026-08-29 22:00",
+                    extras={"tally_date": "2026-08-30"},
+                )
+            ]
+        )
+        today = transactions_for_date(self.db, "2026-08-30")
+        self.assertEqual([row.transaction_id for row in today], ["17110853320"])
+
 
 if __name__ == "__main__":
     unittest.main()

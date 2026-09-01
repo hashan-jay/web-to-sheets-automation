@@ -34,10 +34,14 @@ def persist_env_values(updates: dict[str, str]) -> None:
 
 def _load_env() -> None:
     load_dotenv(ROOT / ".env")
+    bundled = ROOT / "ms-playwright"
+    if bundled.exists():
+        os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(bundled))
+        return
     if os.name == "nt":
         browsers = Path.home() / "AppData" / "Local" / "ms-playwright"
         if browsers.exists():
-            os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(browsers)
+            os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(browsers))
 
 
 def _bool(name: str, default: bool) -> bool:
@@ -96,7 +100,7 @@ class Settings:
     )
     headed: bool = True
     slow_mo_ms: int = 0
-    max_pages: int = 50
+    max_pages: int = 200
     poll_interval_seconds: int = 60
     use_open_browser: bool = True
     auth_state_path: Path = ROOT / "auth_state.json"
@@ -138,7 +142,7 @@ class Settings:
             ),
             headed=_bool("HEADED", True),
             slow_mo_ms=_int("SLOW_MO_MS", 0),
-            max_pages=_int("MAX_PAGES", 50),
+            max_pages=_int("MAX_PAGES", 200),
             poll_interval_seconds=_int("POLL_INTERVAL_SECONDS", 60),
             use_open_browser=_bool("USE_OPEN_BROWSER", False),
         )

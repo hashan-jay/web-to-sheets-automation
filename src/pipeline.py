@@ -68,6 +68,7 @@ def txn_row_event(txn: Transaction, copy_status: str, detail: str) -> dict:
         "datetime": txn.datetime,
         "created": txn.created,
         "processed": txn.processed,
+        "tally_date": (txn.extras or {}).get("tally_date") or txn_local_date(txn),
         "status": copy_status,
         "detail": detail,
     }
@@ -90,7 +91,7 @@ def gather_from_dashboard(
                 "current 6-digit Google Authenticator code into 2FA Passcode and click LOGIN."
             ),
         )
-    capture = scrape_transactions(settings, limit=limit)
+    capture = scrape_transactions(settings, limit=limit, on_event=on_event)
     transactions = capture.transactions
     result.scraped = len(transactions)
     result.website_records = capture.website_records
@@ -125,6 +126,15 @@ def gather_from_dashboard(
             f"{result.new_notifications} new notification(s) queued."
         ),
     )
+    if capture.website_records and result.scraped < capture.website_records:
+        _emit(
+            on_event,
+            kind="log",
+            message=(
+                f"Extracted {result.scraped} of website Record {capture.website_records}. "
+                "Some Completed pages were not read. Run now again with the browser visible."
+            ),
+        )
     return result
 
 
@@ -340,7 +350,10 @@ def sync_date_to_sheet(
         _emit(
             on_event,
             kind="log",
-            message=f"Google Sheet already has every GUI record for {day}. Nothing to restore.",
+            message=(
+                f"Google Sheet already has every GUI record for {day}. "
+                "Nothing else to restore."
+            ),
         )
         _emit(on_event, kind="done", message=f"Sync complete for {day}. missing=0", counts=db.counts())
         return result

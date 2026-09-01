@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 from datetime import datetime
 
@@ -12,6 +13,29 @@ COMPLETED_STATUS = "COMPLETED"
 
 def local_today() -> str:
     return datetime.now().astimezone().strftime("%Y-%m-%d")
+
+
+def estimated_pages(records: int, per_page: int) -> int:
+    if records <= 0 or per_page <= 0:
+        return 0
+    return max(1, math.ceil(records / per_page))
+
+
+PAGE_HREF_RE = re.compile(r"page-(\d+)", re.I)
+
+
+def pager_last_from_hrefs(hrefs: list[str], current: int = 1) -> int:
+    nums = [int(match.group(1)) for href in hrefs if (match := PAGE_HREF_RE.search(str(href or "")))]
+    if current:
+        nums.append(int(current))
+    return max(nums) if nums else 0
+
+
+def pager_bounds(labels: list[str], current: int = 0) -> tuple[int, int]:
+    nums = [int(item) for item in labels if str(item).strip().isdigit()]
+    last = max(nums) if nums else 0
+    now = current if current else (nums[0] if nums else 1)
+    return now, last
 
 
 def parse_website_summary(text: str) -> dict[str, int | str]:

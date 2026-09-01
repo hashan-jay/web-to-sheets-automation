@@ -18,7 +18,14 @@ from src.errors import ConfigError
 from src.live_page import persist_dashboard_url, scrape_open_browser
 from src.mapper import ALLOWED_BRANDS, resolve_brand
 from src.models import Transaction
-from src.tally import COMPLETED_STATUS, local_today, parse_website_summary
+from src.tally import (
+    COMPLETED_STATUS,
+    estimated_pages,
+    local_today,
+    pager_bounds,
+    pager_last_from_hrefs,
+    parse_website_summary,
+)
 
 EXTRACT_SUMMARY_JS = r"""
 () => {
@@ -54,6 +61,60 @@ SET_STATUS_JS = r"""
   }
   return "";
 }
+"""
+
+PAGER_JS = r"""
+() => {
+  const root = document.querySelector(".pagination.simple-pagination, .simple-pagination");
+  if (!root) return { current: 1, last: 0, labels: [], hrefs: [] };
+  const active = root.querySelector("li.active span.current, li.active .current");
+  const currentText = active ? String(active.textContent || "").trim() : "1";
+  const current = Number(currentText) || 1;
+  const hrefs = Array.from(root.querySelectorAll("a.page-link[href*='page-']"))
+    .map((el) => el.getAttribute("href") || "");
+  const fromHref = hrefs.map((href) => {
+    const match = String(href).match(/page-(\d+)/i);
+    return match ? Number(match[1]) : 0;
+  }).filter(Boolean);
+  const labels = Array.from(root.querySelectorAll("a.page-link, span.current"))
+    .map((el) => String(el.textContent || "").replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+  const last = fromHref.length ? Math.max(current, Math.max.apply(null, fromHref)) : current;
+  return { current, last, labels, hrefs };
+}
+"""
+
+CLICK_PAGER_JS = r"""
+(args) => {
+  const kind = args && args[0];
+  const value = Number(args && args[1]) || 0;
+  const root = document.querySelector(".pagination.simple-pagination, .simple-pagination");
+  if (!root) return false;
+  const jq = window.jQuery || window.$;
+  if (kind === "page" && value && jq && jq.fn && jq.fn.pagination) {
+    try {
+      jq(root).pagination("selectPage", value);
+      return true;
+    } catch (err) {}
+  }
+  let target = null;
+  if (kind === "next") {
+    target = root.querySelector("a.page-link.next, a.next.page-link");
+    if (target && target.closest("li.disabled")) return false;
+  } else if (value) {
+    target = root.querySelector('a.page-link[href="#page-' + value + '"]');
+  }
+  if (!target) return false;
+  target.scrollIntoView({ block: "center", inline: "nearest" });
+  target.click();
+  return true;
+}
+"""
+
+PAGE_IDS_JS = r"""
+() => Array.from(document.querySelectorAll(
+  "#transactions-list tr[data-id], .list-wrapper tr[data-id], table tr[data-id]"
+)).map((tr) => (tr.getAttribute("data-id") || "").trim()).filter(Boolean)
 """
 
 SET_DATES_JS = r"""
@@ -426,6 +487,10 @@ def _apply_filters(page: Page, settings: Settings) -> None:
             page.get_by_text(re.compile(r"Record:\s*\d+", re.I)).first.wait_for(timeout=8000)
         except PlaywrightTimeout:
             page.wait_for_timeout(1500)
+    try:
+        page.locator(".pagination.simple-pagination, .simple-pagination").first.wait_for(timeout=8000)
+    except PlaywrightTimeout:
+        page.wait_for_timeout(800)
 
 
 def _page_summary(page: Page) -> dict[str, int | str]:
@@ -441,38 +506,116 @@ def _page_summary(page: Page) -> dict[str, int | str]:
         return {"records": 0, "total": ""}
 
 
-def _goto_next_page(page: Page) -> bool:
-    next_btn = page.get_by_role(
-        "button", name=re.compile(r"next|>|»", re.I)
-    ).filter(has_not_text=re.compile(r"previous|back", re.I))
-    candidates = [
-        next_btn,
-        page.locator('a, button').filter(has_text=re.compile(r"^Next$", re.I)),
-        page.locator('[aria-label*="next" i]'),
-    ]
-    for locator in candidates:
-        if locator.count() == 0:
-            continue
-        target = locator.last
-        if not target.is_enabled():
-            continue
-        disabled = target.get_attribute("disabled")
-        aria = target.get_attribute("aria-disabled")
-        classes = target.get_attribute("class") or ""
-        if disabled is not None or aria == "true" or "disabled" in classes.lower():
-            continue
-        before = page.locator("body").inner_text()
-        target.click()
-        try:
-            page.wait_for_function(
-                "old => document.body.innerText !== old",
-                arg=before[:500],
-                timeout=8000,
-            )
-        except PlaywrightTimeout:
-            page.wait_for_timeout(1000)
+def _pager_state(page: Page) -> dict[str, int | list[str]]:
+    try:
+        raw = page.evaluate(PAGER_JS)
+    except Exception:
+        raw = {}
+    labels = list(raw.get("labels") or [])
+    hrefs = list(raw.get("hrefs") or [])
+    current, last_from_labels = pager_bounds(labels, int(raw.get("current") or 0))
+    last = max(int(raw.get("last") or 0), last_from_labels, pager_last_from_hrefs(hrefs, current))
+    return {"current": current, "last": last, "labels": labels}
+
+
+def _page_ids(page: Page) -> list[str]:
+    try:
+        raw = page.evaluate(PAGE_IDS_JS)
+        return [str(item) for item in raw if item]
+    except Exception:
+        return []
+
+
+def _goto_page(page: Page, number: int) -> bool:
+    before = _page_ids(page)
+    state = _pager_state(page)
+    current = int(state.get("current") or 0)
+    if current == number:
         return True
-    return False
+    clicked = False
+    try:
+        clicked = bool(page.evaluate(CLICK_PAGER_JS, ["page", number]))
+    except Exception:
+        clicked = False
+    if not clicked:
+        link = page.locator(
+            f'.pagination.simple-pagination a.page-link[href="#page-{number}"], '
+            f'.simple-pagination a.page-link[href="#page-{number}"]'
+        )
+        if link.count():
+            try:
+                link.first.scroll_into_view_if_needed()
+                link.first.click(timeout=3000)
+                clicked = True
+            except Exception:
+                clicked = False
+    if not clicked:
+        return False
+    try:
+        page.wait_for_function(
+            """old => {
+              const ids = Array.from(document.querySelectorAll(
+                "#transactions-list tr[data-id], .list-wrapper tr[data-id], table tr[data-id]"
+              )).map((tr) => (tr.getAttribute("data-id") || "").trim()).filter(Boolean);
+              return ids.length > 0 && ids.join(",") !== old;
+            }""",
+            arg=",".join(before),
+            timeout=12000,
+        )
+    except PlaywrightTimeout:
+        page.wait_for_timeout(1200)
+        if _page_ids(page) == before:
+            return False
+    return True
+
+
+def _goto_next_page(page: Page) -> bool:
+    before = _page_ids(page)
+    state = _pager_state(page)
+    current = int(state.get("current") or 1)
+    last = int(state.get("last") or 0)
+    if last and current >= last:
+        return False
+    clicked = False
+    try:
+        clicked = bool(page.evaluate(CLICK_PAGER_JS, ["next", ""]))
+    except Exception:
+        clicked = False
+    if not clicked and last and current < last:
+        try:
+            clicked = bool(page.evaluate(CLICK_PAGER_JS, ["page", current + 1]))
+        except Exception:
+            clicked = False
+    if not clicked:
+        next_btn = page.locator(
+            ".pagination.simple-pagination a.page-link.next, .simple-pagination a.page-link.next"
+        )
+        if next_btn.count():
+            try:
+                next_btn.last.scroll_into_view_if_needed()
+                next_btn.last.click(timeout=3000)
+                clicked = True
+            except Exception:
+                clicked = False
+    if not clicked:
+        return False
+    try:
+        page.wait_for_function(
+            """old => {
+              const ids = Array.from(document.querySelectorAll(
+                "#transactions-list tr[data-id], .list-wrapper tr[data-id], table tr[data-id]"
+              )).map((tr) => (tr.getAttribute("data-id") || "").trim()).filter(Boolean);
+              return ids.length > 0 && ids.join(",") !== old;
+            }""",
+            arg=",".join(before),
+            timeout=12000,
+        )
+    except PlaywrightTimeout:
+        page.wait_for_timeout(1500)
+        after = _page_ids(page)
+        if after == before:
+            return False
+    return True
 
 
 def _to_transaction(raw: dict) -> Transaction:
@@ -511,7 +654,11 @@ class ScrapeCapture:
     filter_status: str = COMPLETED_STATUS
 
 
-def scrape_transactions(settings: Settings, limit: int | None = None) -> ScrapeCapture:
+def scrape_transactions(
+    settings: Settings,
+    limit: int | None = None,
+    on_event=None,
+) -> ScrapeCapture:
     settings.require_dashboard()
     settings.filter_status = COMPLETED_STATUS
     day = settings.filter_date_from.strip() or local_today()
@@ -533,6 +680,10 @@ def scrape_transactions(settings: Settings, limit: int | None = None) -> ScrapeC
             capture.website_total = str(summary["total"] or "")
         if collected:
             rows = list(collected.values())
+            for txn in rows:
+                extras = dict(txn.extras or {})
+                extras["tally_date"] = day
+                txn.extras = extras
             capture.transactions = rows[:limit] if limit else rows
             return capture
 
@@ -590,18 +741,56 @@ def scrape_transactions(settings: Settings, limit: int | None = None) -> ScrapeC
             summary = _page_summary(page)
             capture.website_records = int(summary.get("records") or 0)
             capture.website_total = str(summary.get("total") or "")
+            state = _pager_state(page)
+            per_page = max(len(_page_ids(page)), 1)
+            last_page = max(
+                int(state.get("last") or 0),
+                estimated_pages(int(capture.website_records or 0), per_page),
+            )
+            page_limit = max(settings.max_pages, last_page, 80)
+            _goto_page(page, 1)
+            if on_event:
+                on_event(
+                    {
+                        "kind": "log",
+                        "message": (
+                            f"Completed list shows Record: {capture.website_records or '?'} "
+                            f"· about {per_page} per page · {last_page or '?'} page(s). "
+                            "Reading every page so today's GUI count can match."
+                        ),
+                    }
+                )
 
-            for _ in range(max(settings.max_pages, 1)):
+            for page_num in range(1, page_limit + 1):
                 raw_cards = page.evaluate(EXTRACT_CARDS_JS, list(ALLOWED_BRANDS))
                 for raw in raw_cards:
                     txn = _to_transaction(raw)
                     if txn.transaction_id:
                         collected[txn.transaction_id] = txn
+                state = _pager_state(page)
+                current_page = int(state.get("current") or page_num)
+                last_page = max(
+                    int(state.get("last") or 0),
+                    last_page,
+                    estimated_pages(int(capture.website_records or 0), per_page),
+                )
+                if on_event:
+                    on_event(
+                        {
+                            "kind": "log",
+                            "message": (
+                                f"Page {current_page}/{last_page or '?'} · "
+                                f"{len(collected)} unique of "
+                                f"{capture.website_records or '?'} Completed records."
+                            ),
+                        }
+                    )
                 if limit and len(collected) >= limit:
                     break
                 if capture.website_records and len(collected) >= capture.website_records:
                     break
-                if not _goto_next_page(page):
+                advanced = _goto_page(page, page_num + 1) or _goto_next_page(page)
+                if not advanced:
                     break
 
             if _on_transactions_page(page):
@@ -612,6 +801,10 @@ def scrape_transactions(settings: Settings, limit: int | None = None) -> ScrapeC
                 browser.close()
 
     rows = list(collected.values())
+    for txn in rows:
+        extras = dict(txn.extras or {})
+        extras["tally_date"] = day
+        txn.extras = extras
     capture.transactions = rows[:limit] if limit else rows
     return capture
 

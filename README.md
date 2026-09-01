@@ -27,6 +27,27 @@ python gui_app.py
 
 The window shows the status of each copy. **Start watcher** copies a row as soon as a new notification is inserted into `data/gathering.db` (and also polls the dashboard on the interval you set).
 
+## Deploy as a portable folder (no Python install on the other PC)
+
+Build a self-contained folder that already includes a private Python, pip packages, and Playwright Chromium:
+
+```powershell
+cd D:\BPO-Projects\finance-automation
+powershell -ExecutionPolicy Bypass -File .\scripts\build_portable.ps1
+```
+
+That creates `dist\FinanceAutomation\`. Zip that folder, copy it to the other PC, unzip it, then:
+
+1. Copy `.env.example` to `.env` and fill in dashboard and Google Sheet values.
+2. Copy `credentials\service-account.json` into the `credentials` folder.
+3. Double-click `Start Finance Automation.bat`.
+
+The other PC does **not** need Python, pip, or `playwright install`. Chrome is optional; the folder ships its own Chromium. To also copy your current `.env` and credentials into the build (only for machines you control):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\build_portable.ps1 -IncludeConfig
+```
+
 ## Run from the command line
 
 ```powershell
@@ -46,8 +67,12 @@ Useful flags:
 
 ## Sheet columns
 
-| A | B | C | D | E | F | G | H | I | J | K | L | M |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| Day | Datetime | Receiving account | Name | Amount | Status | ID | Brand | BSB | Username | PayID | Staff code | Created |
+Rows are written by category. Only the listed cells are filled; the other columns stay blank.
 
-Column G is the duplicate key. Existing IDs are skipped.
+| | A | B | C | D | E | F | G | H | I | J | K | L |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| Header | Day | Date | Bank | Description | Amount | Status | ID | Company Owner | Company Name | Company TRF | Player | Staff |
+| Deposit | day | datetime | company bank | player name | amount | Deposit | ID | brand | | | username | staff |
+| Withdraw | day | datetime | company bank | player name | **-amount** | Withdraw | ID | | brand | *(blank, user selects)* | username | staff |
+
+Column G is the duplicate key. Existing IDs are skipped. Withdrawal amounts are stored as negatives so the sheet can sum them. Company TRF is left blank for the dropdown.

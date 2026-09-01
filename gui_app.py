@@ -5,6 +5,7 @@ import queue
 import re
 import threading
 import tkinter as tk
+import webbrowser
 from datetime import datetime
 from tkinter import messagebox, ttk
 
@@ -38,6 +39,7 @@ DEPOSIT_CORE_COLUMNS = (
     "name",
     "amount",
     "type",
+    "bank",
     "method",
     "brand",
     "created",
@@ -52,7 +54,7 @@ COLUMN_HEADINGS = {
     "mobile": ("Mobile", 110),
     "amount": ("Amount", 80),
     "type": ("Type", 80),
-    "bank": ("Bank", 70),
+    "bank": ("Bank", 90),
     "acc_name": ("Acc Name", 150),
     "acc_no": ("Acc No", 110),
     "bsb": ("BSB", 70),
@@ -94,7 +96,6 @@ from src.pipeline import (
     txn_row_event,
 )
 from src.tally import COMPLETED_STATUS, format_amount, local_today, parse_amount, txn_kind
-from src.watcher import NotificationWatcher
 
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(1)
@@ -112,12 +113,12 @@ class FinanceAutomationApp:
         self.db = GatheringDB(self.settings.database_path)
         self.events: queue.Queue[dict] = queue.Queue()
         self.worker: threading.Thread | None = None
-        self.watcher: NotificationWatcher | None = None
+        self.watcher = None
         self.row_items: dict[str, tuple[str, str]] = {}
 
         self.scrape_deposits = tk.BooleanVar(value=True)
         self.scrape_withdrawals = tk.BooleanVar(value=True)
-        self.use_open_browser = tk.BooleanVar(value=self.settings.use_open_browser)
+        self.use_open_browser = tk.BooleanVar(value=False)
         self.headless = tk.BooleanVar(value=not self.settings.headed)
         self.capturing_latest = False
         self.bulk_loading = False
@@ -148,8 +149,8 @@ class FinanceAutomationApp:
         self.extend_btn_text = tk.StringVar(value="Show hidden details")
         self.poll_interval = tk.IntVar(value=self.settings.poll_interval_seconds)
         self.status_text = tk.StringVar(value="Idle")
-        self.watch_text = tk.StringVar(value="Watcher: Off")
         self.stat_pending = tk.StringVar(value="0")
+        self.stat_extracted = tk.StringVar(value="0")
         self.stat_copied = tk.StringVar(value="0")
         self.stat_failed = tk.StringVar(value="0")
         self.stat_skipped = tk.StringVar(value="0")
@@ -168,6 +169,12 @@ class FinanceAutomationApp:
         self._load_recent_rows()
         self._append_log("GUI ready. Open a section on the right. Run now only scrapes.")
         self._append_log("Send deposits or withdrawals from those sections after you tally the rows.")
+        self._append_log(
+            "Deposits write Day, Date, Bank, Description, Amount, Status=Deposit, ID, "
+            "Company Owner, Player, Staff. Withdrawals write Day, Bank, Description, "
+            "minus Amount, Status=Withdraw, ID, Company Name, blank Company TRF, Player, Staff."
+        )
+        self._bind_shortcuts()
         self.root.after(120, self._drain_events)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -187,6 +194,7 @@ class FinanceAutomationApp:
         style.configure("Tally.TLabel", background="#f4f7fb", foreground="#0f2744", font=("Segoe UI", 10, "bold"))
         style.configure("TallyBox.TFrame", background="#f4f7fb")
         style.configure("Run.TButton", font=("Segoe UI", 10, "bold"), padding=8)
+        style.configure("Quick.TButton", font=("Segoe UI", 9), padding=5)
         style.configure("Cred.TButton", font=("Consolas", 9), padding=5, background="#f4f7fb")
         style.configure("LoginBox.TFrame", background="#f4f7fb")
         style.configure("TNotebook", background="#eef2f7", borderwidth=0)
@@ -273,40 +281,67 @@ class FinanceAutomationApp:
         ttk.Checkbutton(sidebar, text="Scrape withdrawals", variable=self.scrape_withdrawals).pack(anchor="w")
         ttk.Checkbutton(
             sidebar,
-            text="Use the website already open in Chrome/Brave",
-            variable=self.use_open_browser,
-        ).pack(anchor="w", pady=(4, 0))
-        ttk.Checkbutton(
-            sidebar,
             text="Hide browser (only if 2FA is already saved)",
             variable=self.headless,
         ).pack(anchor="w", pady=(4, 10))
 
         ttk.Label(sidebar, text="Scrape", style="CardTitle.TLabel").pack(anchor="w", pady=(4, 6))
         ttk.Button(sidebar, text="Run now", style="Run.TButton", command=self._run_now).pack(fill="x", pady=3)
-        ttk.Button(sidebar, text="Start watcher", command=self._start_watcher).pack(fill="x", pady=3)
-        ttk.Button(sidebar, text="Stop watcher", command=self._stop_watcher).pack(fill="x", pady=3)
-        ttk.Label(sidebar, textvariable=self.watch_text, style="Muted.TLabel").pack(anchor="w", pady=(8, 10))
+        ttk.Label(
+            sidebar,
+            text="Run now opens Completed, then clicks page 1 through the last page-link (for example #page-28).",
+            style="Muted.TLabel",
+            wraplength=280,
+        ).pack(anchor="w", pady=(8, 10))
 
-        interval = ttk.Frame(sidebar, style="Card.TFrame")
-        interval.pack(fill="x", pady=(0, 14))
-        ttk.Label(interval, text="Dashboard poll (seconds)", style="Muted.TLabel").pack(anchor="w")
-        ttk.Spinbox(interval, from_=5, to=3600, textvariable=self.poll_interval, width=10).pack(
-            anchor="w", pady=(4, 0)
-        )
+        ttk.Label(sidebar, text="Quick actions", style="CardTitle.TLabel").pack(anchor="w", pady=(4, 6))
+        ttk.Button(
+            sidebar, text="Send deposits to sheet", style="Quick.TButton",
+            command=lambda: self._send_section_to_sheet("deposit"),
+        ).pack(fill="x", pady=2)
+        ttk.Button(
+            sidebar, text="Send withdrawals to sheet", style="Quick.TButton",
+            command=lambda: self._send_section_to_sheet("withdraw"),
+        ).pack(fill="x", pady=2)
+        ttk.Button(
+            sidebar, text="Select all to-send here", style="Quick.TButton",
+            command=self._select_all_to_send,
+        ).pack(fill="x", pady=2)
+        ttk.Button(
+            sidebar, text="Copy selected IDs", style="Quick.TButton",
+            command=self._copy_selected_ids,
+        ).pack(fill="x", pady=2)
+        ttk.Button(
+            sidebar, text="Open Google Sheet", style="Quick.TButton",
+            command=self._open_google_sheet,
+        ).pack(fill="x", pady=2)
+        ttk.Button(
+            sidebar, text="Sync Google Sheet", style="Quick.TButton",
+            command=self._sync_records_with_sheet,
+        ).pack(fill="x", pady=2)
+        ttk.Label(
+            sidebar,
+            text="Shortcuts: Ctrl+R run · Ctrl+1–4 tabs · Ctrl+D send deposits · Ctrl+W send withdrawals · Ctrl+T today",
+            style="Muted.TLabel",
+            wraplength=280,
+        ).pack(anchor="w", pady=(6, 10))
 
-        ttk.Label(sidebar, text="Gathering database", style="CardTitle.TLabel").pack(anchor="w", pady=(8, 8))
+        ttk.Label(sidebar, text="Selected date tally", style="CardTitle.TLabel").pack(anchor="w", pady=(8, 8))
         stats = ttk.Frame(sidebar, style="Card.TFrame")
         stats.pack(fill="x")
-        self._stat_block(stats, "To send", self.stat_pending).grid(row=0, column=0, padx=(0, 12))
-        self._stat_block(stats, "Sent", self.stat_copied).grid(row=0, column=1, padx=(0, 12))
-        self._stat_block(stats, "Failed", self.stat_failed).grid(row=1, column=0, padx=(0, 12), pady=(10, 0))
-        self._stat_block(stats, "Already on sheet", self.stat_skipped).grid(
+        self._stat_block(stats, "Extracted Transactions", self.stat_extracted).grid(
+            row=0, column=0, padx=(0, 12)
+        )
+        self._stat_block(stats, "Sent Count to Google Sheets", self.stat_copied).grid(
+            row=0, column=1, padx=(0, 12)
+        )
+        self._stat_block(stats, "To send", self.stat_pending).grid(row=1, column=0, padx=(0, 12), pady=(10, 0))
+        self._stat_block(stats, "Failed", self.stat_failed).grid(
             row=1, column=1, padx=(0, 12), pady=(10, 0)
         )
         ttk.Label(
             sidebar,
-            text="Run now scrapes Completed for the selected tally date. Send from Latest scrape, Deposits, or Withdrawals. Duplicate IDs are skipped.",
+            text="Run now reads every Completed page for the selected date. Send writes new IDs only. Sync restores deleted sheet rows and never duplicates.",
             style="Muted.TLabel",
             wraplength=280,
         ).pack(anchor="w", pady=(16, 0))
@@ -342,6 +377,34 @@ class FinanceAutomationApp:
         )
         ttk.Label(filter_card, textvariable=self.match_caption, style="Tally.TLabel").grid(
             row=2, column=0, columnspan=2, sticky="w", pady=(4, 0)
+        )
+        quick = ttk.Frame(filter_card, style="Card.TFrame")
+        quick.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        ttk.Button(quick, text="Deposits", style="Quick.TButton", command=lambda: self._show_tab(1)).pack(
+            side="left", padx=(0, 6)
+        )
+        ttk.Button(quick, text="Withdrawals", style="Quick.TButton", command=lambda: self._show_tab(2)).pack(
+            side="left", padx=(0, 6)
+        )
+        ttk.Button(quick, text="Sent", style="Quick.TButton", command=lambda: self._show_tab(3)).pack(
+            side="left", padx=(0, 6)
+        )
+        ttk.Button(
+            quick, text="Send deposits", style="Quick.TButton",
+            command=lambda: self._send_section_to_sheet("deposit"),
+        ).pack(side="left", padx=(0, 6))
+        ttk.Button(
+            quick, text="Send withdrawals", style="Quick.TButton",
+            command=lambda: self._send_section_to_sheet("withdraw"),
+        ).pack(side="left", padx=(0, 6))
+        ttk.Button(quick, text="Select to-send", style="Quick.TButton", command=self._select_all_to_send).pack(
+            side="left", padx=(0, 6)
+        )
+        ttk.Button(quick, text="Copy IDs", style="Quick.TButton", command=self._copy_selected_ids).pack(
+            side="left", padx=(0, 6)
+        )
+        ttk.Button(quick, text="Open sheet", style="Quick.TButton", command=self._open_google_sheet).pack(
+            side="left"
         )
 
         self.pages = ttk.Notebook(right)
@@ -679,10 +742,89 @@ class FinanceAutomationApp:
         self._apply_filters()
         self._append_log(f"Date filter set to today ({today}).")
 
+    def _bind_shortcuts(self) -> None:
+        self.root.bind("<Control-r>", lambda _event: self._run_now())
+        self.root.bind("<Control-R>", lambda _event: self._run_now())
+        self.root.bind("<Control-t>", lambda _event: self._select_today())
+        self.root.bind("<Control-T>", lambda _event: self._select_today())
+        self.root.bind("<Control-Key-1>", lambda _event: self._show_tab(0))
+        self.root.bind("<Control-Key-2>", lambda _event: self._show_tab(1))
+        self.root.bind("<Control-Key-3>", lambda _event: self._show_tab(2))
+        self.root.bind("<Control-Key-4>", lambda _event: self._show_tab(3))
+        self.root.bind("<Control-D>", lambda _event: self._send_section_to_sheet("deposit"))
+        self.root.bind("<Control-W>", lambda _event: self._send_section_to_sheet("withdraw"))
+        self.root.bind("<Control-S>", lambda _event: self._sync_records_with_sheet())
+        self.root.bind("<Control-l>", lambda _event: self._copy_selected_ids())
+        self.root.bind("<Control-L>", lambda _event: self._copy_selected_ids())
+
+    def _show_tab(self, index: int) -> None:
+        self.pages.select(index)
+        names = ("Latest scrape", "Deposits", "Withdrawals", "Google Sheet sent")
+        if 0 <= index < len(names):
+            self._append_log(f"Opened {names[index]}.")
+
+    def _current_section(self) -> str:
+        try:
+            index = int(self.pages.index(self.pages.select()))
+        except Exception:
+            return "latest"
+        return ("latest", "deposit", "withdraw", "sent")[index]
+
+    def _select_all_to_send(self) -> None:
+        section = self._current_section()
+        if section == "sent":
+            self.pages.select(1)
+            section = "deposit"
+        tree = self._tree_for(section)
+        if section == "deposit":
+            self.deposit_status_filter.set("To send")
+        elif section == "withdraw":
+            self.withdraw_status_filter.set("To send")
+        self._apply_filters()
+        selected: list[str] = []
+        for item in tree.get_children(""):
+            rec = self.row_store.get((section, item))
+            if not rec or not self._row_matches(rec, section):
+                continue
+            status = str((rec.get("tags") or ("",))[0])
+            if status in {"Copied", "Skipped"}:
+                continue
+            selected.append(item)
+        tree.selection_set(selected)
+        self._update_filter_caption()
+        self._append_log(f"Selected {len(selected)} to-send row(s) in {section}.")
+
+    def _copy_selected_ids(self) -> None:
+        section = self._current_section()
+        recs = self._selected_records(section) or self._section_records(section, visible_only=True)
+        ids: list[str] = []
+        for rec in recs:
+            values = rec.get("values") or ()
+            txn_id = str(values[1] if len(values) > 1 else "")
+            if txn_id:
+                ids.append(txn_id)
+        if not ids:
+            messagebox.showinfo("No IDs", "No transaction IDs in the current view to copy.")
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append("\n".join(ids))
+        self._append_log(f"Copied {len(ids)} transaction ID(s) to the clipboard.")
+
+    def _open_google_sheet(self) -> None:
+        sheet_id = self.settings.google_sheet_id or Settings.load().google_sheet_id
+        if not sheet_id:
+            messagebox.showinfo(
+                "Google Sheet not set",
+                "Set GOOGLE_SHEET_ID in .env before opening the sheet.",
+            )
+            return
+        webbrowser.open(f"https://docs.google.com/spreadsheets/d/{sheet_id}")
+        self._append_log("Opened the Google Sheet in the browser.")
+
     def _current_settings(self) -> Settings:
         settings = Settings.load()
         settings.headed = not self.headless.get()
-        settings.use_open_browser = self.use_open_browser.get()
+        settings.use_open_browser = False
         settings.poll_interval_seconds = int(self.poll_interval.get() or 60)
         settings.dashboard_username = self.login_username.get().strip()
         settings.dashboard_password = self.login_password.get()
@@ -849,25 +991,13 @@ class FinanceAutomationApp:
         self.worker = threading.Thread(target=work, name="automation-run", daemon=True)
         self.worker.start()
 
-    def _start_watcher(self) -> None:
-        if self.watcher and self.watcher.running:
-            return
-        settings = self._current_settings()
-        self.watcher = NotificationWatcher(
-            settings,
-            self.events.put,
-            dry_run=True,
-            poll_interval=settings.poll_interval_seconds,
-        )
-        self.watcher.start()
-        self.watch_text.set("Watcher: On — waiting for notifications")
-        self._append_log("Watcher is on. New rows appear in Latest scrape, Deposits, and Withdrawals.")
-
     def _stop_watcher(self) -> None:
         if self.watcher:
-            self.watcher.stop()
+            try:
+                self.watcher.stop()
+            except Exception:
+                pass
             self.watcher = None
-        self.watch_text.set("Watcher: Off")
 
     def _drain_events(self) -> None:
         while True:
@@ -925,19 +1055,6 @@ class FinanceAutomationApp:
             if self.open_sent_after_send:
                 self.open_sent_after_send = False
                 self.pages.select(3)
-            if self.arm_watcher_after_run:
-                self.arm_watcher_after_run = False
-                message = str(event.get("message") or "").lower()
-                failed = (
-                    "run failed" in message
-                    or "invalid login" in message
-                    or "login was not" in message
-                    or "rejected this login" in message
-                )
-                if failed:
-                    self._append_log("Watcher not started because login or scrape failed.")
-                else:
-                    self._start_watcher()
 
     def _row_values(self, event: dict, stamp: str | None = None) -> tuple:
         when = record_local_datetime(
@@ -986,13 +1103,16 @@ class FinanceAutomationApp:
         return value or "(blank)"
 
     def _row_date(self, event: dict, values: tuple) -> str:
+        tally = self._extract_date(event.get("tally_date"))
+        if tally:
+            return tally
         when = record_local_datetime(
+            event.get("processed"),
             event.get("datetime"),
             event.get("created"),
-            event.get("processed"),
             values[0] if values else "",
         )
-        return self._extract_date(when)
+        return self._extract_date(when) or self.website_date or self._scrape_date()
 
     def _known_dates(self) -> list[str]:
         dates: set[str] = set()
@@ -1142,11 +1262,35 @@ class FinanceAutomationApp:
             f"Deposits {self._tally_text(self._dated(deposit_all))}  ·  "
             f"Withdrawals {self._tally_text(self._dated(withdraw_all))}"
         )
-        self.latest_title.set(f"Latest scrape  ·  {len(latest)} row(s) on {date_label}")
+        self.latest_title.set(
+            f"Latest scrape  ·  Extracted Transactions: {len(gui_ids)} on {date_label}"
+        )
         self.deposit_title.set(f"Deposits  ·  {len(deposits)} visible")
         self.withdraw_title.set(f"Withdrawals  ·  {len(withdrawals)} visible")
         sent_date = self.sent_date_filter.get() or date_label
-        self.sent_title.set(f"Google Sheet sent data  ·  {len(sent)} visible on {sent_date}")
+        sent_ids = self._record_ids(self._dated(self._section_records("sent"), "sent"))
+        self.sent_title.set(
+            f"Google Sheet sent data  ·  Sent Count to Google Sheets: {len(sent_ids)} on {sent_date}"
+        )
+        self.stat_extracted.set(str(len(gui_ids)))
+        self.stat_copied.set(str(len(sent_ids)))
+        pending_ids = self._record_ids(
+            [
+                rec
+                for rec in self._dated(deposit_all) + self._dated(withdraw_all)
+                if str((rec.get("tags") or ("",))[0])
+                in {"Pending", "Gathered", "Preview", "Copying"}
+            ]
+        )
+        failed_ids = self._record_ids(
+            [
+                rec
+                for rec in self._dated(deposit_all) + self._dated(withdraw_all)
+                if str((rec.get("tags") or ("",))[0]) == "Failed"
+            ]
+        )
+        self.stat_pending.set(str(len(pending_ids)))
+        self.stat_failed.set(str(len(failed_ids)))
         self.latest_tally.set(self._section_tally_line("latest", latest))
         self.deposit_tally.set(self._money_tally_line("deposit"))
         self.withdraw_tally.set(self._money_tally_line("withdraw"))
@@ -1300,10 +1444,8 @@ class FinanceAutomationApp:
         self.log.configure(state="disabled")
 
     def _apply_counts(self, counts: dict) -> None:
-        self.stat_pending.set(str(counts.get("pending", 0)))
-        self.stat_copied.set(str(counts.get("copied", 0)))
-        self.stat_failed.set(str(counts.get("failed", 0)))
         self.stat_skipped.set(str(counts.get("skipped", 0)))
+        self._update_filter_caption()
 
     def _refresh_counts(self) -> None:
         self._apply_counts(self.db.counts())

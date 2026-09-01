@@ -36,6 +36,28 @@ class SheetClient:
         ids = self.ws.col_values(7)
         return len(ids) + 1
 
+    def clear_bank_names(self) -> int:
+        last_error: Exception | None = None
+        for attempt in range(4):
+            try:
+                ids = self.ws.col_values(7)
+                start, end = bank_clear_range(ids)
+                if not start:
+                    return 0
+                blanks = [[""] for _ in range(end - start + 1)]
+                self.ws.update(
+                    range_name=f"C{start}:C{end}",
+                    values=blanks,
+                    value_input_option="USER_ENTERED",
+                )
+                return sum(1 for item in ids if str(item).strip().isdigit())
+            except APIError as exc:
+                last_error = exc
+                if "429" not in str(exc) or attempt == 3:
+                    raise
+                time.sleep(20 * (attempt + 1))
+        raise last_error or RuntimeError("Google Sheets bank-name clear failed.")
+
     def write_row(self, row: list[str]) -> int:
         return self.write_rows([row])
 
@@ -58,6 +80,13 @@ class SheetClient:
                     raise
                 time.sleep(20 * (attempt + 1))
         raise last_error or RuntimeError("Google Sheets write failed.")
+
+
+def bank_clear_range(ids: list[str]) -> tuple[int, int]:
+    rows = [index for index, item in enumerate(ids, start=1) if str(item).strip().isdigit()]
+    if not rows:
+        return 0, 0
+    return rows[0], rows[-1]
 
 
 def index_sheet_ids(

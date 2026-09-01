@@ -60,7 +60,10 @@ def date_key(raw: object) -> str:
 
 
 def txn_local_date(txn: Transaction) -> str:
-    return date_key(record_local_datetime(txn.datetime, txn.created, txn.processed))
+    stamped = date_key((txn.extras or {}).get("tally_date"))
+    if stamped:
+        return stamped
+    return date_key(record_local_datetime(txn.processed, txn.datetime, txn.created))
 
 
 def normalize_status(value: str) -> str:
@@ -92,21 +95,70 @@ def normalize_brand(value: str, settings: Settings) -> str:
     return resolve_brand(raw, default="")
 
 
+def is_withdraw(status: object) -> bool:
+    return str(status or "").strip().upper().startswith("WITHDRAW")
+
+
+def sheet_status(status: object) -> str:
+    return "Withdraw" if is_withdraw(status) else "Deposit"
+
+
+def sheet_amount(amount: object, status: object) -> str:
+    raw = str(amount or "").strip().replace("$", "").replace(",", "").replace(" ", "")
+    if raw.startswith("(") and raw.endswith(")"):
+        raw = f"-{raw[1:-1]}"
+    unsigned = raw.lstrip("+-") or "0"
+    if is_withdraw(status):
+        return f"-{unsigned}"
+    return unsigned
+
+
+def sheet_bank(txn: Transaction, settings: Settings) -> str:
+    return (settings.default_bank_account or txn.bank or "").strip()
+
+
+def sheet_description(txn: Transaction) -> str:
+    return clean_name(txn.bank_account_name or txn.name)
+
+
 def to_sheet_row(txn: Transaction, settings: Settings) -> list[str]:
-    display_name = clean_name(txn.bank_account_name or txn.name)
+    """Write only the cashbook fields for this category; leave the rest blank.
+
+    A DAY | B DATE | C BANK | D DESCRIPTION | E AMOUNT | F STATUS | G ID |
+    H COMPANY OWNER | I COMPANY NAME | J COMPANY TRF | K PLAYER | L STAFF
+    """
     when = record_local_datetime(txn.datetime, txn.created, txn.processed)
+    brand = normalize_brand(txn.brand, settings)
+    bank = sheet_bank(txn, settings)
+    description = sheet_description(txn)
+    player = (txn.username or "").strip()
+    staff = settings.default_staff_code
+    if is_withdraw(txn.status):
+        return [
+            day_from_datetime(when),
+            when,
+            bank,
+            description,
+            sheet_amount(txn.amount, txn.status),
+            "Withdraw",
+            txn.transaction_id,
+            "",
+            brand,
+            "",
+            player,
+            staff,
+        ]
     return [
         day_from_datetime(when),
         when,
-        "",
-        display_name,
-        txn.amount,
-        normalize_status(txn.status),
+        bank,
+        description,
+        sheet_amount(txn.amount, txn.status),
+        "Deposit",
         txn.transaction_id,
-        normalize_brand(txn.brand, settings),
-        txn.bsb,
-        txn.username,
-        txn.pay_id,
-        settings.default_staff_code,
-        when,
+        brand,
+        "",
+        "",
+        player,
+        staff,
     ]

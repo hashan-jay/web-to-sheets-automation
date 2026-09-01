@@ -71,7 +71,20 @@ class GatheringDB:
                     )
                     inserted += 1
                 except sqlite3.IntegrityError:
-                    continue
+                    existing = conn.execute(
+                        "SELECT payload_json FROM notifications WHERE transaction_id = ?",
+                        (txn.transaction_id,),
+                    ).fetchone()
+                    if not existing:
+                        continue
+                    data = json.loads(existing["payload_json"])
+                    extras = data.get("extras") or {}
+                    extras.update(txn.extras or {})
+                    data["extras"] = extras
+                    conn.execute(
+                        "UPDATE notifications SET payload_json = ? WHERE transaction_id = ?",
+                        (json.dumps(data), txn.transaction_id),
+                    )
         return inserted
 
     def pending(self) -> list[Transaction]:
