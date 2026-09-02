@@ -4,6 +4,7 @@ import ctypes
 import queue
 import re
 import threading
+import time
 import tkinter as tk
 import webbrowser
 from datetime import datetime
@@ -172,6 +173,7 @@ class FinanceAutomationApp:
         self.auto_interval = tk.IntVar(value=int(self.settings.poll_interval_seconds or 60))
         self.auto_running = False
         self._auto_after_id: str | None = None
+        self._auto_deadline = 0.0
         self.status_text = tk.StringVar(value="Idle")
         self.stat_pending = tk.StringVar(value="0")
         self.stat_extracted = tk.StringVar(value="0")
@@ -1018,56 +1020,72 @@ class FinanceAutomationApp:
             "The Google Sheet is not updated until you send."
         )
         try:
-            self._start_job(scrape=True, write_sheet=False)
+            started = self._start_job(scrape=True, write_sheet=False, quiet=True)
+            if not started:
+                self._schedule_next_auto()
         except Exception as exc:
-            self.auto_running = False
-            self.capturing_latest = False
-            messagebox.showerror("Automated Run failed", str(exc))
             self._append_log(f"Automated Run failed: {exc}")
+            self._schedule_next_auto()
 
     def _stop_automated_run(self) -> None:
         if not self.auto_running and self._auto_after_id is None:
             self._append_log("Automated Run is not active.")
             return
         self.auto_running = False
-        if self._auto_after_id is not None:
-            try:
-                self.root.after_cancel(self._auto_after_id)
-            except Exception:
-                pass
-            self._auto_after_id = None
+        self._cancel_auto_timer()
         if not self._busy():
             self.capturing_latest = False
             self.status_text.set("Idle")
         self._append_log("Automated Run stopped. Latest scrape rows are kept until you clear them.")
 
+    def _cancel_auto_timer(self) -> None:
+        if self._auto_after_id is None:
+            return
+        try:
+            self.root.after_cancel(self._auto_after_id)
+        except Exception:
+            pass
+        self._auto_after_id = None
+
     def _schedule_next_auto(self) -> None:
         if not self.auto_running:
             return
-        if self._auto_after_id is not None:
-            try:
-                self.root.after_cancel(self._auto_after_id)
-            except Exception:
-                pass
+        self._cancel_auto_timer()
         seconds = self._auto_interval_seconds()
+        self._auto_deadline = time.monotonic() + seconds
         self.status_text.set(f"Automated run: next scrape in {seconds}s")
-        self._auto_after_id = self.root.after(seconds * 1000, self._auto_tick)
+        self._append_log(f"Automated Run waiting {seconds}s before the next scrape.")
+        self._auto_after_id = self.root.after(1000, self._auto_countdown)
+
+    def _auto_countdown(self) -> None:
+        self._auto_after_id = None
+        if not self.auto_running:
+            return
+        remaining = int(round(self._auto_deadline - time.monotonic()))
+        if remaining <= 0:
+            self._auto_tick()
+            return
+        self.status_text.set(f"Automated run: next scrape in {remaining}s")
+        self._auto_after_id = self.root.after(1000, self._auto_countdown)
 
     def _auto_tick(self) -> None:
         self._auto_after_id = None
         if not self.auto_running:
             return
         if self._busy():
+            self.status_text.set("Automated run: waiting for the current job to finish")
             self._auto_after_id = self.root.after(1000, self._auto_tick)
             return
         self.capturing_latest = True
         self.pages.select(0)
         self._append_log(
-            f"Automated Run tick: scraping Completed for {self._scrape_date()}. "
-            "Skipping IDs already on the Google Sheet."
+            f"Automated Run tick: scraping Completed for {self._scrape_date()} "
+            f"on {normalize_dashboard_url(self.login_website.get())}."
         )
         try:
-            self._start_job(scrape=True, write_sheet=False)
+            started = self._start_job(scrape=True, write_sheet=False, quiet=True)
+            if not started:
+                self._schedule_next_auto()
         except Exception as exc:
             self._append_log(f"Automated Run tick failed: {exc}")
             self._schedule_next_auto()
@@ -1143,19 +1161,23 @@ class FinanceAutomationApp:
         if not by_id:
             return
         unsent = [rec for txn_id, rec in by_id.items() if not self._already_on_sheet(txn_id)]
-        for txn_id in list(self.latest_run_ids):
-            if txn_id in by_id and self._already_on_sheet(txn_id):
-                self._remove_latest_id(txn_id)
-        for rec in unsent:
-            values = rec.get("values") or ()
-            txn_id = str(values[1] if len(values) > 1 else "")
-            if not txn_id:
-                continue
-            self.latest_run_ids.add(txn_id)
-            self._upsert_row(
-                self._event_from_rec(rec, "Gathered", "Not sent to Google Sheet yet"),
-                bucket="latest",
-            )
+        self.bulk_loading = True
+        try:
+            for txn_id in list(self.latest_run_ids):
+                if txn_id in by_id and self._already_on_sheet(txn_id):
+                    self._remove_latest_id(txn_id)
+            for rec in unsent:
+                values = rec.get("values") or ()
+                txn_id = str(values[1] if len(values) > 1 else "")
+                if not txn_id:
+                    continue
+                self.latest_run_ids.add(txn_id)
+                self._upsert_row(
+                    self._event_from_rec(rec, "Gathered", "Not sent to Google Sheet yet"),
+                    bucket="latest",
+                )
+        finally:
+            self.bulk_loading = False
         missing = len(unsent)
         extracted = len(by_id)
         sent = extracted - missing
@@ -1318,10 +1340,11 @@ class FinanceAutomationApp:
                 ids.append(txn_id)
         return ids
 
-    def _start_job(self, scrape: bool, write_sheet: bool = False) -> None:
+    def _start_job(self, scrape: bool, write_sheet: bool = False, quiet: bool = False) -> bool:
         if self._busy():
-            messagebox.showinfo("Busy", "A run is already in progress.")
-            return
+            if not quiet:
+                messagebox.showinfo("Busy", "A run is already in progress.")
+            return False
         self.status_text.set("Running...")
         settings = self._current_settings()
         self._append_log(
@@ -1348,6 +1371,7 @@ class FinanceAutomationApp:
 
         self.worker = threading.Thread(target=work, name="automation-run", daemon=True)
         self.worker.start()
+        return True
 
     def _stop_watcher(self) -> None:
         if self.watcher:
@@ -1363,7 +1387,10 @@ class FinanceAutomationApp:
                 event = self.events.get_nowait()
             except queue.Empty:
                 break
-            self._handle_event(event)
+            try:
+                self._handle_event(event)
+            except Exception as exc:
+                self._append_log(f"Event handler error: {exc}")
         if not self._busy() and self.status_text.get() in {
             "Running...",
             "Sending to Google Sheet...",
@@ -1374,6 +1401,8 @@ class FinanceAutomationApp:
                 self.status_text.set(f"Automated run: next scrape in {seconds}s")
             else:
                 self.status_text.set("Idle")
+        if self.auto_running and self._auto_after_id is None and not self._busy():
+            self._schedule_next_auto()
         self.root.after(120, self._drain_events)
 
     def _handle_event(self, event: dict) -> None:
@@ -1421,18 +1450,28 @@ class FinanceAutomationApp:
             self._refresh_unsent_latest()
         if kind == "done":
             self._prefer_sent_tab = self.open_sent_after_send
-            self._refresh_counts()
-            self._reload_workspace()
-            if self.open_sent_after_send:
-                self.open_sent_after_send = False
-                self.pages.select(3)
             if self.auto_running:
                 self.capturing_latest = True
                 self._schedule_next_auto()
-            else:
-                self.capturing_latest = False
-                self.status_text.set("Idle")
-            self._queue_sheet_unsent_check()
+                try:
+                    self._refresh_counts()
+                except Exception as exc:
+                    self._append_log(f"Could not refresh counts: {exc}")
+                return
+            self.capturing_latest = False
+            self.status_text.set("Idle")
+            try:
+                self._refresh_counts()
+                self._reload_workspace()
+            except Exception as exc:
+                self._append_log(f"Could not refresh workspace: {exc}")
+            if self.open_sent_after_send:
+                self.open_sent_after_send = False
+                self.pages.select(3)
+            try:
+                self._queue_sheet_unsent_check()
+            except Exception as exc:
+                self._append_log(f"Unsent check failed: {exc}")
 
     def _row_values(self, event: dict, stamp: str | None = None) -> tuple:
         when = record_local_datetime(
@@ -1874,12 +1913,7 @@ class FinanceAutomationApp:
 
     def _on_close(self) -> None:
         self.auto_running = False
-        if self._auto_after_id is not None:
-            try:
-                self.root.after_cancel(self._auto_after_id)
-            except Exception:
-                pass
-            self._auto_after_id = None
+        self._cancel_auto_timer()
         self._stop_watcher()
         self.root.destroy()
 
