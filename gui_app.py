@@ -148,6 +148,9 @@ class FinanceAutomationApp:
         self.deposit_extended = False
         self.extend_btn_text = tk.StringVar(value="Show hidden details")
         self.poll_interval = tk.IntVar(value=self.settings.poll_interval_seconds)
+        self.auto_interval = tk.IntVar(value=int(self.settings.poll_interval_seconds or 60))
+        self.auto_running = False
+        self._auto_after_id: str | None = None
         self.status_text = tk.StringVar(value="Idle")
         self.stat_pending = tk.StringVar(value="0")
         self.stat_extracted = tk.StringVar(value="0")
@@ -291,7 +294,36 @@ class FinanceAutomationApp:
             text="Run now opens Completed, then clicks page 1 through the last page-link (for example #page-28).",
             style="Muted.TLabel",
             wraplength=280,
-        ).pack(anchor="w", pady=(8, 10))
+        ).pack(anchor="w", pady=(8, 8))
+        timer_row = ttk.Frame(sidebar, style="Card.TFrame")
+        timer_row.pack(fill="x", pady=(0, 4))
+        ttk.Label(timer_row, text="Timer (seconds)", style="Muted.TLabel").pack(side="left")
+        ttk.Spinbox(
+            timer_row,
+            from_=5,
+            to=3600,
+            increment=5,
+            textvariable=self.auto_interval,
+            width=8,
+        ).pack(side="right")
+        ttk.Button(
+            sidebar,
+            text="Automated Run",
+            style="Run.TButton",
+            command=self._start_automated_run,
+        ).pack(fill="x", pady=3)
+        ttk.Button(
+            sidebar,
+            text="Stop Automated Run",
+            style="Quick.TButton",
+            command=self._stop_automated_run,
+        ).pack(fill="x", pady=3)
+        ttk.Label(
+            sidebar,
+            text="Automated Run scrapes Completed on this timer and adds only new IDs to Latest scrape. Stop Automated Run ends the loop.",
+            style="Muted.TLabel",
+            wraplength=280,
+        ).pack(anchor="w", pady=(4, 10))
 
         ttk.Label(sidebar, text="Quick actions", style="CardTitle.TLabel").pack(anchor="w", pady=(4, 6))
         ttk.Button(
@@ -666,7 +698,10 @@ class FinanceAutomationApp:
         self._clear_bucket("latest")
         self.latest_run_ids = set()
         self._update_filter_caption()
-        self._append_log("Cleared the latest scrape table. Saved deposits and withdrawals are unchanged.")
+        self._append_log(
+            "Cleared the latest scrape table. Google Sheet sent rows and saved "
+            "deposits/withdrawals are unchanged."
+        )
 
     def _toggle_deposit_details(self) -> None:
         self.deposit_extended = not self.deposit_extended
@@ -835,19 +870,127 @@ class FinanceAutomationApp:
         settings.filter_status = COMPLETED_STATUS
         return settings
 
-    def _run_now(self) -> None:
+    def _scrape_ready(self, action: str) -> bool:
+        if self.auto_running and action == "Run now":
+            messagebox.showinfo(
+                "Automated run is active",
+                "Click Stop Automated Run before using Run now.",
+            )
+            return False
         if not self.login_username.get().strip() or not self.login_password.get():
             messagebox.showwarning(
                 "Login required",
                 "Enter username and password in the Website login section, "
                 "or click the saved details to fill them.",
             )
-            return
+            return False
         if not self.scrape_deposits.get() and not self.scrape_withdrawals.get():
             messagebox.showwarning(
                 "Nothing selected",
-                "Check Scrape deposits and/or Scrape withdrawals before Run now.",
+                "Check Scrape deposits and/or Scrape withdrawals before running.",
             )
+            return False
+        return True
+
+    def _auto_interval_seconds(self) -> int:
+        try:
+            value = int(self.auto_interval.get() or 60)
+        except (tk.TclError, TypeError, ValueError):
+            value = 60
+        return max(5, value)
+
+    def _start_automated_run(self) -> None:
+        if self.auto_running:
+            messagebox.showinfo("Already running", "Automated Run is already active.")
+            return
+        if not self._scrape_ready("Automated Run"):
+            return
+        if self._busy():
+            messagebox.showinfo("Busy", "A run is already in progress.")
+            return
+        self._persist_login_fields()
+        self.poll_interval.set(self._auto_interval_seconds())
+        self.auto_running = True
+        self.capturing_latest = True
+        self.arm_watcher_after_run = False
+        self.pages.select(0)
+        seconds = self._auto_interval_seconds()
+        self.status_text.set(f"Automated run every {seconds}s")
+        self._append_log(
+            f"Automated Run started. Scraping Completed every {seconds}s. "
+            "Already scraped IDs are skipped in Latest scrape. "
+            "The Google Sheet is not updated until you send."
+        )
+        try:
+            self._start_job(scrape=True, write_sheet=False)
+        except Exception as exc:
+            self.auto_running = False
+            self.capturing_latest = False
+            messagebox.showerror("Automated Run failed", str(exc))
+            self._append_log(f"Automated Run failed: {exc}")
+
+    def _stop_automated_run(self) -> None:
+        if not self.auto_running and self._auto_after_id is None:
+            self._append_log("Automated Run is not active.")
+            return
+        self.auto_running = False
+        if self._auto_after_id is not None:
+            try:
+                self.root.after_cancel(self._auto_after_id)
+            except Exception:
+                pass
+            self._auto_after_id = None
+        if not self._busy():
+            self.capturing_latest = False
+            self.status_text.set("Idle")
+        self._append_log("Automated Run stopped. Latest scrape rows are kept until you clear them.")
+
+    def _schedule_next_auto(self) -> None:
+        if not self.auto_running:
+            return
+        if self._auto_after_id is not None:
+            try:
+                self.root.after_cancel(self._auto_after_id)
+            except Exception:
+                pass
+        seconds = self._auto_interval_seconds()
+        self.status_text.set(f"Automated run: next scrape in {seconds}s")
+        self._auto_after_id = self.root.after(seconds * 1000, self._auto_tick)
+
+    def _auto_tick(self) -> None:
+        self._auto_after_id = None
+        if not self.auto_running:
+            return
+        if self._busy():
+            self._auto_after_id = self.root.after(1000, self._auto_tick)
+            return
+        self.capturing_latest = True
+        self.pages.select(0)
+        self._append_log(
+            f"Automated Run tick: scraping Completed for {self._scrape_date()}. "
+            "Skipping IDs already in Latest scrape or already saved."
+        )
+        try:
+            self._start_job(scrape=True, write_sheet=False)
+        except Exception as exc:
+            self._append_log(f"Automated Run tick failed: {exc}")
+            self._schedule_next_auto()
+
+    def _already_scraped(self, txn_id: str) -> bool:
+        if not txn_id:
+            return False
+        if txn_id in self.latest_run_ids:
+            return True
+        for (section, _item), rec in self.row_store.items():
+            if section == "latest":
+                continue
+            values = rec.get("values") or ()
+            if len(values) > 1 and str(values[1]) == txn_id:
+                return True
+        return False
+
+    def _run_now(self) -> None:
+        if not self._scrape_ready("Run now"):
             return
         self._persist_login_fields()
         self._clear_bucket("latest")
@@ -872,7 +1015,7 @@ class FinanceAutomationApp:
         if not ids:
             messagebox.showinfo(
                 "Nothing to send",
-                "Run now first. Then send this latest scrape to Google Sheets.",
+                "Run now or Automated Run first. Then send this latest scrape to Google Sheets.",
             )
             return
         self._start_sheet_send(ids, "latest scrape")
@@ -1010,7 +1153,11 @@ class FinanceAutomationApp:
             "Sending to Google Sheet...",
             "Syncing Google Sheet...",
         }:
-            self.status_text.set("Idle")
+            if self.auto_running:
+                seconds = self._auto_interval_seconds()
+                self.status_text.set(f"Automated run: next scrape in {seconds}s")
+            else:
+                self.status_text.set("Idle")
         self.root.after(120, self._drain_events)
 
     def _handle_event(self, event: dict) -> None:
@@ -1019,9 +1166,12 @@ class FinanceAutomationApp:
             status = str(event.get("status") or "")
             txn_id = str(event.get("transaction_id") or "")
             if self.capturing_latest and status == "Gathered" and self._type_wanted(event.get("type")):
-                if txn_id:
-                    self.latest_run_ids.add(txn_id)
-                self._upsert_row(event, bucket="latest")
+                if txn_id and self._already_scraped(txn_id):
+                    pass
+                else:
+                    if txn_id:
+                        self.latest_run_ids.add(txn_id)
+                    self._upsert_row(event, bucket="latest")
             if status in {"Gathered", "Copied", "Skipped", "Failed", "Preview", "Pending"}:
                 if self._type_wanted(event.get("type")) or status != "Gathered":
                     self._upsert_row(event)
@@ -1047,13 +1197,17 @@ class FinanceAutomationApp:
             self.sheet_tally_date = str(event.get("date") or "")
             self._update_match_caption()
         if kind == "done":
-            self.status_text.set("Idle")
-            self.capturing_latest = False
             self._refresh_counts()
             self._reload_workspace()
             if self.open_sent_after_send:
                 self.open_sent_after_send = False
                 self.pages.select(3)
+            if self.auto_running:
+                self.capturing_latest = True
+                self._schedule_next_auto()
+            else:
+                self.capturing_latest = False
+                self.status_text.set("Idle")
 
     def _row_values(self, event: dict, stamp: str | None = None) -> tuple:
         when = record_local_datetime(
@@ -1485,6 +1639,13 @@ class FinanceAutomationApp:
         self._reload_workspace()
 
     def _on_close(self) -> None:
+        self.auto_running = False
+        if self._auto_after_id is not None:
+            try:
+                self.root.after_cancel(self._auto_after_id)
+            except Exception:
+                pass
+            self._auto_after_id = None
         self._stop_watcher()
         self.root.destroy()
 
