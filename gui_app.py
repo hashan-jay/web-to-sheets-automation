@@ -86,7 +86,12 @@ STATUS_RANK = {
     "Copied": 4,
 }
 
-from src.config import Settings, persist_env_values
+from src.config import (
+    Settings,
+    active_login_slot,
+    load_login_accounts,
+    persist_login_account,
+)
 from src.database import GatheringDB, _transaction_from_payload
 from src.mapper import record_local_datetime, sheet_tab_name
 from src.pipeline import (
@@ -123,12 +128,20 @@ class FinanceAutomationApp:
         self.capturing_latest = False
         self.bulk_loading = False
         self.latest_run_ids: set[str] = set()
-        self.login_username = tk.StringVar(value=self.settings.dashboard_username)
-        self.login_password = tk.StringVar(value=self.settings.dashboard_password)
-        self.login_2fa = tk.StringVar(value=self.settings.dashboard_2fa)
-        self.saved_username = self.settings.dashboard_username
-        self.saved_password = self.settings.dashboard_password
-        self.saved_2fa = self.settings.dashboard_2fa
+        self.login_accounts = load_login_accounts()
+        self.active_account = tk.IntVar(value=active_login_slot())
+        active = self.login_accounts[self.active_account.get() - 1]
+        self.login_username = tk.StringVar(
+            value=active["username"] or self.settings.dashboard_username
+        )
+        self.login_password = tk.StringVar(
+            value=active["password"] or self.settings.dashboard_password
+        )
+        self.login_2fa = tk.StringVar(value=active["twofa"] or self.settings.dashboard_2fa)
+        self.saved_username = self.login_username.get()
+        self.saved_password = self.login_password.get()
+        self.saved_2fa = self.login_2fa.get()
+        self.account_use_btns: list[ttk.Button] = []
         self.arm_watcher_after_run = False
         self.open_sent_after_send = False
         self.row_store: dict[tuple[str, str], dict] = {}
@@ -251,32 +264,40 @@ class FinanceAutomationApp:
         )
         ttk.Label(sidebar, textvariable=self.status_text, style="Muted.TLabel").pack(anchor="w", pady=(0, 8))
 
-        ttk.Label(sidebar, text="Saved details — click to fill", style="Muted.TLabel").pack(anchor="w")
-        saved = ttk.Frame(sidebar, style="LoginBox.TFrame", padding=8)
-        saved.pack(fill="x", pady=(4, 10))
-        self.saved_user_btn = ttk.Button(
-            saved, style="Cred.TButton", command=lambda: self._fill_login_field("username")
-        )
-        self.saved_user_btn.pack(fill="x", pady=2)
-        self.saved_pass_btn = ttk.Button(
-            saved, style="Cred.TButton", command=lambda: self._fill_login_field("password")
-        )
-        self.saved_pass_btn.pack(fill="x", pady=2)
-        self.saved_2fa_btn = ttk.Button(
-            saved, style="Cred.TButton", command=lambda: self._fill_login_field("2fa")
-        )
-        self.saved_2fa_btn.pack(fill="x", pady=2)
-        ttk.Button(saved, text="Use these credentials", command=self._fill_all_saved_login).pack(
-            fill="x", pady=(6, 0)
-        )
-        self._refresh_saved_login_buttons()
-
         ttk.Label(sidebar, text="Username", style="Muted.TLabel").pack(anchor="w")
         ttk.Entry(sidebar, textvariable=self.login_username, width=28).pack(fill="x", pady=(2, 6))
         ttk.Label(sidebar, text="Password", style="Muted.TLabel").pack(anchor="w")
         ttk.Entry(sidebar, textvariable=self.login_password, width=28).pack(fill="x", pady=(2, 6))
         ttk.Label(sidebar, text="2FA code", style="Muted.TLabel").pack(anchor="w")
         ttk.Entry(sidebar, textvariable=self.login_2fa, width=28).pack(fill="x", pady=(2, 10))
+
+        ttk.Label(sidebar, text="Saved accounts (3)", style="CardTitle.TLabel").pack(anchor="w")
+        ttk.Label(
+            sidebar,
+            text="Click an account to use it, then Run now. Save current writes these fields into that slot.",
+            style="Muted.TLabel",
+            wraplength=280,
+        ).pack(anchor="w", pady=(2, 6))
+        accounts_box = ttk.Frame(sidebar, style="LoginBox.TFrame", padding=8)
+        accounts_box.pack(fill="x", pady=(0, 10))
+        self.account_use_btns = []
+        for slot in (1, 2, 3):
+            row = ttk.Frame(accounts_box, style="LoginBox.TFrame")
+            row.pack(fill="x", pady=2)
+            use_btn = ttk.Button(
+                row,
+                style="Cred.TButton",
+                command=lambda number=slot: self._select_account(number),
+            )
+            use_btn.pack(side="left", fill="x", expand=True, padx=(0, 6))
+            self.account_use_btns.append(use_btn)
+            ttk.Button(
+                row,
+                text="Save",
+                style="Quick.TButton",
+                command=lambda number=slot: self._save_account(number),
+            ).pack(side="right")
+        self._refresh_account_buttons()
 
         ttk.Label(sidebar, text="What to scrape", style="CardTitle.TLabel").pack(anchor="w", pady=(4, 6))
         ttk.Checkbutton(sidebar, text="Scrape deposits", variable=self.scrape_deposits).pack(anchor="w")
@@ -723,44 +744,75 @@ class FinanceAutomationApp:
     def _busy(self) -> bool:
         return self.worker is not None and self.worker.is_alive()
 
-    def _refresh_saved_login_buttons(self) -> None:
-        user = self.saved_username or "(none)"
-        password = self.saved_password or "(none)"
-        twofa = self.saved_2fa or "(none)"
-        self.saved_user_btn.configure(text=f"Username    {user}")
-        self.saved_pass_btn.configure(text=f"Password    {password}")
-        self.saved_2fa_btn.configure(text=f"2FA         {twofa}")
+    def _account_button_text(self, slot: int) -> str:
+        account = self.login_accounts[slot - 1]
+        username = account["username"] or "(empty)"
+        selected = " ●" if slot == self.active_account.get() else ""
+        return f"Account {slot}  {username}{selected}"
 
-    def _fill_login_field(self, kind: str) -> None:
-        if kind == "username":
-            self.login_username.set(self.saved_username)
-        elif kind == "password":
-            self.login_password.set(self.saved_password)
-        elif kind == "2fa":
-            self.login_2fa.set(self.saved_2fa)
-        self._append_log(f"Filled {kind} from saved login details.")
+    def _refresh_account_buttons(self) -> None:
+        for slot, button in enumerate(self.account_use_btns, start=1):
+            button.configure(text=self._account_button_text(slot))
 
-    def _fill_all_saved_login(self) -> None:
-        self.login_username.set(self.saved_username)
-        self.login_password.set(self.saved_password)
-        self.login_2fa.set(self.saved_2fa)
-        self._append_log("Filled username, password, and 2FA from saved login details.")
+    def _select_account(self, slot: int) -> None:
+        account = self.login_accounts[slot - 1]
+        if not account["username"] and not account["password"]:
+            messagebox.showinfo(
+                f"Account {slot} is empty",
+                "Enter username, password, and 2FA above, then click Save on this account.",
+            )
+            return
+        self.active_account.set(slot)
+        self.login_username.set(account["username"])
+        self.login_password.set(account["password"])
+        self.login_2fa.set(account["twofa"])
+        self.saved_username = account["username"]
+        self.saved_password = account["password"]
+        self.saved_2fa = account["twofa"]
+        persist_login_account(slot, account["username"], account["password"], account["twofa"])
+        self._refresh_account_buttons()
+        self._append_log(f"Using saved Account {slot} ({account['username'] or 'no username'}).")
+
+    def _save_account(self, slot: int) -> None:
+        username = self.login_username.get().strip()
+        password = self.login_password.get()
+        twofa = self.login_2fa.get().strip()
+        if not username or not password:
+            messagebox.showwarning(
+                "Nothing to save",
+                "Enter a username and password before saving this account.",
+            )
+            return
+        self.active_account.set(slot)
+        self.login_accounts[slot - 1] = {
+            "slot": str(slot),
+            "username": username,
+            "password": password,
+            "twofa": twofa,
+        }
+        persist_login_account(slot, username, password, twofa)
+        self.saved_username = username
+        self.saved_password = password
+        self.saved_2fa = twofa
+        self._refresh_account_buttons()
+        self._append_log(f"Saved current login fields to Account {slot} ({username}).")
 
     def _persist_login_fields(self) -> None:
         username = self.login_username.get().strip()
         password = self.login_password.get()
         twofa = self.login_2fa.get().strip()
-        persist_env_values(
-            {
-                "DASHBOARD_USERNAME": username,
-                "DASHBOARD_PASSWORD": password,
-                "DASHBOARD_2FA": twofa,
-            }
-        )
+        slot = self.active_account.get()
+        self.login_accounts[slot - 1] = {
+            "slot": str(slot),
+            "username": username,
+            "password": password,
+            "twofa": twofa,
+        }
+        persist_login_account(slot, username, password, twofa)
         self.saved_username = username
         self.saved_password = password
         self.saved_2fa = twofa
-        self._refresh_saved_login_buttons()
+        self._refresh_account_buttons()
 
     def _scrape_date(self) -> str:
         selected = self.date_filter.get().strip()

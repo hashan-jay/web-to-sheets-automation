@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from src.errors import ConfigError
 
 ROOT = Path(__file__).resolve().parent.parent
+LOGIN_ACCOUNT_SLOTS = (1, 2, 3)
 
 
 def persist_env_values(updates: dict[str, str]) -> None:
@@ -30,6 +31,67 @@ def persist_env_values(updates: dict[str, str]) -> None:
         if key not in seen:
             lines.append(f"{key}={value}")
     env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def login_slot(raw: object) -> int:
+    try:
+        slot = int(str(raw or "1").strip())
+    except ValueError:
+        return 1
+    return slot if slot in LOGIN_ACCOUNT_SLOTS else 1
+
+
+def login_account_keys(slot: int) -> dict[str, str]:
+    number = login_slot(slot)
+    return {
+        "username": f"LOGIN_{number}_USERNAME",
+        "password": f"LOGIN_{number}_PASSWORD",
+        "twofa": f"LOGIN_{number}_2FA",
+    }
+
+
+def load_login_accounts() -> list[dict[str, str]]:
+    _load_env()
+    accounts: list[dict[str, str]] = []
+    for slot in LOGIN_ACCOUNT_SLOTS:
+        keys = login_account_keys(slot)
+        accounts.append(
+            {
+                "slot": str(slot),
+                "username": os.getenv(keys["username"], "").strip(),
+                "password": os.getenv(keys["password"], ""),
+                "twofa": os.getenv(keys["twofa"], "").strip(),
+            }
+        )
+    if not accounts[0]["username"]:
+        accounts[0] = {
+            "slot": "1",
+            "username": os.getenv("DASHBOARD_USERNAME", "").strip(),
+            "password": os.getenv("DASHBOARD_PASSWORD", ""),
+            "twofa": os.getenv("DASHBOARD_2FA", "").strip(),
+        }
+    return accounts
+
+
+def active_login_slot() -> int:
+    _load_env()
+    return login_slot(os.getenv("LOGIN_ACTIVE_SLOT", "1"))
+
+
+def persist_login_account(slot: int, username: str, password: str, twofa: str) -> None:
+    number = login_slot(slot)
+    keys = login_account_keys(number)
+    persist_env_values(
+        {
+            keys["username"]: username,
+            keys["password"]: password,
+            keys["twofa"]: twofa,
+            "LOGIN_ACTIVE_SLOT": str(number),
+            "DASHBOARD_USERNAME": username,
+            "DASHBOARD_PASSWORD": password,
+            "DASHBOARD_2FA": twofa,
+        }
+    )
 
 
 def _load_env() -> None:
