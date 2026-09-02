@@ -49,7 +49,7 @@ def office_file_error(exc: Exception) -> ConfigError | None:
         "This file is still an Excel (.xlsx) Office file on Google Drive. "
         "This app can only write to a native Google Sheet. "
         "Open the file in Drive → File → Save as Google Sheets, "
-        "then paste that new spreadsheet URL into Sheet 1 or Sheet 2 and share it "
+        "then paste that new spreadsheet URL into Sheet 1–5 and share it "
         "with the service account as Editor."
     )
 

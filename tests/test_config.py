@@ -1,8 +1,10 @@
 import unittest
 
 from src.config import (
+    GOOGLE_SHEET_SLOTS,
     LOGIN_ACCOUNT_SLOTS,
     empty_login_account,
+    google_sheet_env_key,
     google_sheet_url,
     load_gui_theme,
     login_account_clear_updates,
@@ -77,6 +79,12 @@ class LoginAccountTests(unittest.TestCase):
                 "/1BAXqHMZAP9-sVXGn_up32CkmOmwLiPAxDnYf3yqZiRo"
             )
         )
+
+    def test_google_sheet_slots(self) -> None:
+        self.assertEqual(tuple(GOOGLE_SHEET_SLOTS), (1, 2, 3, 4, 5))
+        self.assertEqual(google_sheet_env_key(1), "GOOGLE_SHEET_ID")
+        self.assertEqual(google_sheet_env_key(3), "GOOGLE_SHEET_ID_3")
+        self.assertEqual(google_sheet_env_key(5), "GOOGLE_SHEET_ID_5")
 
 
 if __name__ == "__main__":

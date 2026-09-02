@@ -12,6 +12,7 @@ from src.errors import ConfigError
 
 ROOT = Path(__file__).resolve().parent.parent
 LOGIN_ACCOUNT_SLOTS = (1, 2, 3)
+GOOGLE_SHEET_SLOTS = (1, 2, 3, 4, 5)
 _SHEET_URL_RE = re.compile(r"/spreadsheets/d/([a-zA-Z0-9-_]+)")
 
 
@@ -69,6 +70,11 @@ def normalize_google_sheet_id(raw: object) -> str:
 def google_sheet_url(sheet_id: object) -> str:
     key = normalize_google_sheet_id(sheet_id)
     return f"https://docs.google.com/spreadsheets/d/{key}" if key else ""
+
+
+def google_sheet_env_key(slot: int) -> str:
+    number = int(slot)
+    return "GOOGLE_SHEET_ID" if number <= 1 else f"GOOGLE_SHEET_ID_{number}"
 
 
 def service_account_email(credentials_path: Path) -> str:
@@ -262,11 +268,26 @@ class Settings:
     auth_state_path: Path = ROOT / "auth_state.json"
     database_path: Path = ROOT / "data" / "gathering.db"
     google_sheet_id_2: str = ""
+    google_sheet_id_3: str = ""
+    google_sheet_id_4: str = ""
+    google_sheet_id_5: str = ""
+
+    def sheet_id_at(self, slot: int) -> str:
+        if int(slot) <= 1:
+            return self.google_sheet_id
+        return str(getattr(self, f"google_sheet_id_{int(slot)}", "") or "")
+
+    def set_sheet_id_at(self, slot: int, value: str) -> None:
+        key = normalize_google_sheet_id(value)
+        if int(slot) <= 1:
+            self.google_sheet_id = key
+            return
+        setattr(self, f"google_sheet_id_{int(slot)}", key)
 
     def sheet_ids(self) -> list[str]:
         ids: list[str] = []
-        for raw in (self.google_sheet_id, self.google_sheet_id_2):
-            key = normalize_google_sheet_id(raw)
+        for slot in GOOGLE_SHEET_SLOTS:
+            key = normalize_google_sheet_id(self.sheet_id_at(slot))
             if key and key not in ids:
                 ids.append(key)
         return ids
@@ -287,6 +308,9 @@ class Settings:
             google_sheet_id=normalize_google_sheet_id(os.getenv("GOOGLE_SHEET_ID", "")),
             google_worksheet=os.getenv("GOOGLE_WORKSHEET", "").strip(),
             google_sheet_id_2=normalize_google_sheet_id(os.getenv("GOOGLE_SHEET_ID_2", "")),
+            google_sheet_id_3=normalize_google_sheet_id(os.getenv("GOOGLE_SHEET_ID_3", "")),
+            google_sheet_id_4=normalize_google_sheet_id(os.getenv("GOOGLE_SHEET_ID_4", "")),
+            google_sheet_id_5=normalize_google_sheet_id(os.getenv("GOOGLE_SHEET_ID_5", "")),
             google_credentials_path=_path(
                 "GOOGLE_CREDENTIALS_PATH", "credentials/service-account.json"
             ),
