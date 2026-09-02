@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from html import unescape
 
-from src.mapper import resolve_brand
+from src.mapper import captured_brand, first_brand_tag
 from src.models import Transaction
 
 ID_RE = re.compile(r"#(\d{8,})")
@@ -35,7 +35,8 @@ COPY_RE = re.compile(
     re.I | re.S,
 )
 TYPE_RE = re.compile(r'<div class="type[^"]*">\s*([^<]+)', re.I)
-BRAND_TAG_RE = re.compile(r'class="name-blacklist"[^>]*>([^<]+)', re.I)
+BRAND_TAG_RE = re.compile(r'class="[^"]*name-blacklist[^"]*"[^>]*>([^<]+)', re.I)
+SPAN_TAG_RE = re.compile(r"<span(?![^>]*\b(?:text|copy|hidden)\b)[^>]*>([^<]+)</span>", re.I)
 CREATED_HTML_RE = re.compile(
     r"<b>\s*CREATED\s*</b>\s*<br\s*/?>\s*(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})",
     re.I,
@@ -61,7 +62,9 @@ def parse_transactions_from_html(html: str) -> list[Transaction]:
             if key and value:
                 values[key] = value
         type_match = TYPE_RE.search(body)
-        brand_tags = BRAND_TAG_RE.findall(body)
+        brand_tags = [tag.strip() for tag in BRAND_TAG_RE.findall(body) if tag.strip()]
+        if not brand_tags:
+            brand_tags = [tag.strip() for tag in SPAN_TAG_RE.findall(body) if tag.strip()]
         created = CREATED_HTML_RE.search(body)
         processed = PROCESSED_HTML_RE.search(body)
         txn = Transaction(
@@ -79,7 +82,7 @@ def parse_transactions_from_html(html: str) -> list[Transaction]:
             status=(type_match.group(1).strip().upper() if type_match else ""),
             created=created.group(1) if created else "",
             processed=processed.group(1) if processed else "",
-            brand=resolve_brand(*brand_tags, values.get("name", "")),
+            brand=first_brand_tag(*brand_tags) or captured_brand(brand_tags[0] if brand_tags else ""),
             bsb=values.get("bsb", ""),
             pay_id=values.get("pay_id", ""),
             bank_lock=values.get("bank_lock", ""),
@@ -133,7 +136,7 @@ def _parse_chunk(transaction_id: str, chunk: str) -> Transaction:
         status=(status_match.group(1).upper() if status_match else ""),
         created=created.group(1) if created else "",
         processed=processed.group(1) if processed else "",
-        brand=resolve_brand(brand.group(1) if brand else "", chunk),
+        brand=first_brand_tag(brand.group(1) if brand else ""),
         bsb=values.get("bsb", ""),
         pay_id=values.get("pay_id", ""),
         bank_lock=values.get("bank_lock", ""),

@@ -1830,8 +1830,17 @@ class FinanceAutomationApp:
             previous = list(old_tree.item(item, "values")) if old_tree.exists(item) else []
             if previous:
                 previous_status = str(previous[17] if len(previous) > 17 else "")
+                values = list(values)
                 if values[0] == "" and previous[0]:
-                    values = (previous[0],) + values[1:]
+                    values[0] = previous[0]
+                brand_idx = ALL_COLUMNS.index("brand")
+                if (
+                    len(previous) > brand_idx
+                    and not str(values[brand_idx] if len(values) > brand_idx else "").strip()
+                    and previous[brand_idx]
+                ):
+                    values[brand_idx] = previous[brand_idx]
+                values = tuple(values)
             status = self._keep_status(previous_status, incoming, section)
             values = values[:17] + (status,) + values[18:]
             if old_tree.exists(item):

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 from src.config import Settings
 from src.database import GatheringDB, _transaction_from_payload
-from src.mapper import clean_name, resolve_brand, to_sheet_row, txn_local_date
+from src.mapper import captured_brand, clean_name, to_sheet_row, txn_local_date
 from src.models import Transaction
 from src.scraper import scrape_transactions
 from src.tally import COMPLETED_STATUS
@@ -63,7 +63,7 @@ def txn_row_event(txn: Transaction, copy_status: str, detail: str) -> dict:
         "pay_id": txn.pay_id,
         "bank_lock": txn.bank_lock,
         "method": txn.method,
-        "brand": resolve_brand(txn.brand, txn.name, default=""),
+        "brand": captured_brand(txn.brand),
         "datetime": txn.datetime,
         "created": txn.created,
         "processed": txn.processed,
@@ -117,6 +117,23 @@ def gather_from_dashboard(
         )
     for txn in transactions:
         _emit(on_event, **txn_row_event(txn, "Gathered", "Read from #transactions-list"))
+    branded = [txn.brand for txn in transactions if (txn.brand or "").strip()]
+    missing_brand = result.scraped - len(branded)
+    if branded:
+        sample = ", ".join(sorted(set(branded))[:8])
+        _emit(
+            on_event,
+            kind="log",
+            message=(
+                f"Brand captured on {len(branded)}/{result.scraped} row(s): {sample}."
+            ),
+        )
+    if missing_brand:
+        _emit(
+            on_event,
+            kind="log",
+            message=f"{missing_brand} row(s) had no brand badge on the dashboard.",
+        )
     _emit(
         on_event,
         kind="log",

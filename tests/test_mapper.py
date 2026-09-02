@@ -9,6 +9,7 @@ from src.mapper import (
     SHEET_COL_STAFF,
     clean_name,
     day_from_datetime,
+    first_brand_tag,
     normalize_brand,
     normalize_status,
     record_local_datetime,
@@ -43,6 +44,12 @@ def _settings() -> Settings:
 
 
 class MapperTests(unittest.TestCase):
+    def test_first_brand_tag_uses_first_badge(self) -> None:
+        self.assertEqual(first_brand_tag("FUCKFUCKVIPC", "NETLOSSB"), "FUCKFUCKVIPC")
+        self.assertEqual(first_brand_tag("NETLOSSB", "FUCKSPINVIPC"), "FUCKSPINVIPC")
+        self.assertEqual(first_brand_tag("NETLOSSN"), "")
+        self.assertEqual(first_brand_tag(""), "")
+
     def test_clean_name_strips_tag(self) -> None:
         self.assertEqual(
             clean_name("[JKFCKSPNAU] Caleb William Needham"),
@@ -105,7 +112,7 @@ class MapperTests(unittest.TestCase):
                 "30",
                 "Deposit",
                 "17110853300",
-                "FUCKSPIN",
+                "FUCKSPINVIPA",
                 "",
                 "A10603620",
                 "",
@@ -115,8 +122,10 @@ class MapperTests(unittest.TestCase):
         self.assertEqual(sheet_status("DEPOSIT"), "Deposit")
         self.assertEqual(sheet_amount("30", "DEPOSIT"), "30")
         self.assertEqual(normalize_brand("", settings), "")
-        self.assertEqual(normalize_brand("FUCKSPINVIPC", settings), "FUCKSPIN")
+        self.assertEqual(normalize_brand("FUCKSPINVIPC", settings), "FUCKSPINVIPC")
+        self.assertEqual(normalize_brand("FUCKFUCKVIPC", settings), "FUCKFUCKVIPC")
         self.assertEqual(normalize_brand("NETLOSSN", settings), "")
+        self.assertEqual(normalize_brand("NETLOSSB", settings), "")
         self.assertEqual(normalize_brand("POKIESPARK VIP", settings), "POKIESPARK")
 
     def test_withdraw_card_mapping(self) -> None:
@@ -147,7 +156,7 @@ class MapperTests(unittest.TestCase):
                 "-530.27",
                 "Withdraw",
                 "17113600239",
-                "FUCKSPIN",
+                "FUCKSPINVIPA",
                 "",
                 "A51088178",
                 "",
@@ -166,7 +175,8 @@ class MapperTests(unittest.TestCase):
         )
         self.assertEqual(len(row), SHEET_COL_COUNT)
         self.assertEqual(len(deposit), SHEET_COL_COUNT)
-        self.assertEqual(row[SHEET_COL_COMPANY], deposit[SHEET_COL_COMPANY])
+        self.assertEqual(row[SHEET_COL_COMPANY], "FUCKSPINVIPA")
+        self.assertEqual(deposit[SHEET_COL_COMPANY], "FUCKSPIN")
         self.assertEqual(row[SHEET_COL_STAFF], deposit[SHEET_COL_STAFF])
         self.assertEqual(row[SHEET_COL_PLAYER], "A51088178")
         self.assertEqual(deposit[SHEET_COL_PLAYER], "A1")

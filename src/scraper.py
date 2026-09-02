@@ -16,7 +16,7 @@ from playwright.sync_api import (
 from src.config import ROOT, Settings
 from src.errors import ConfigError
 from src.live_page import persist_dashboard_url, scrape_open_browser
-from src.mapper import ALLOWED_BRANDS, resolve_brand
+from src.mapper import captured_brand
 from src.models import Transaction
 from src.tally import (
     COMPLETED_STATUS,
@@ -143,7 +143,7 @@ _USER_AGENT = (
 )
 
 EXTRACT_CARDS_JS = r"""
-(allowedBrands) => {
+() => {
   const aliases = {
     username: "Username",
     name: "Name",
@@ -167,12 +167,37 @@ EXTRACT_CARDS_JS = r"""
     const data = { transaction_id: (tr.getAttribute("data-id") || "").trim() };
     const type = tr.querySelector("div.type");
     if (type) data.status = type.textContent.trim().toUpperCase();
-    const tags = Array.from(tr.querySelectorAll("span.name-blacklist"))
-      .map((el) => (el.textContent || "").trim().toUpperCase())
-      .filter(Boolean);
-    const hay = tags.join(" ");
-    const allowed = Array.from(allowedBrands || []).sort((a, b) => b.length - a.length);
-    data.brand = allowed.find((brand) => hay.includes(String(brand).toUpperCase())) || "";
+    const skipBrand = /^(COPY|NETLOSS|DEPOSIT|WITHDRAW|WITHDRAWAL|UNCLAIM|MANUAL|CREATED|PROCESSED)$/i;
+    const isBrandPill = (value) => {
+      const text = String(value || "").trim();
+      if (text.length < 3 || text.length > 40) return false;
+      if (skipBrand.test(text) || /^NETLOSS/i.test(text)) return false;
+      return /^[A-Z0-9][A-Z0-9._-]*$/.test(text) && /[A-Z]/.test(text);
+    };
+    const pillSelectors = [
+      "span.name-blacklist",
+      "a.link.profile span",
+      "a.profile span",
+      "span.badge",
+      "span.label",
+      "span.tag",
+    ];
+    const pills = [];
+    for (const selector of pillSelectors) {
+      for (const el of tr.querySelectorAll(selector)) {
+        const text = (el.textContent || "").trim();
+        if (text && !pills.includes(text)) pills.push(text);
+      }
+    }
+    if (!pills.length) {
+      for (const el of tr.querySelectorAll("span")) {
+        const cls = String(el.className || "");
+        if (/\b(text|copy|hidden)\b/i.test(cls)) continue;
+        const text = (el.textContent || "").trim();
+        if (text && !pills.includes(text)) pills.push(text);
+      }
+    }
+    data.brand = pills.find(isBrandPill) || "";
     for (const copy of tr.querySelectorAll("div.copy")) {
       const hidden = copy.querySelector("input.hidden, input[type='text']");
       let value = hidden && hidden.value ? stripTags(hidden.value) : "";
@@ -638,7 +663,7 @@ def _to_transaction(raw: dict) -> Transaction:
         status=str(raw.get("status") or "").strip(),
         created=str(raw.get("created") or "").strip(),
         processed=str(raw.get("processed") or "").strip(),
-        brand=resolve_brand(str(raw.get("brand") or "").strip()),
+        brand=captured_brand(str(raw.get("brand") or "")),
         bsb=str(raw.get("BankBSB") or "").strip(),
         pay_id=str(raw.get("PayID") or "").strip(),
         bank_lock=str(raw.get("BankLock") or "").strip(),
@@ -762,7 +787,7 @@ def scrape_transactions(
                 )
 
             for page_num in range(1, page_limit + 1):
-                raw_cards = page.evaluate(EXTRACT_CARDS_JS, list(ALLOWED_BRANDS))
+                raw_cards = page.evaluate(EXTRACT_CARDS_JS)
                 for raw in raw_cards:
                     txn = _to_transaction(raw)
                     if txn.transaction_id:

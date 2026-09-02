@@ -78,8 +78,14 @@ class GatheringDB:
                     if not existing:
                         continue
                     data = json.loads(existing["payload_json"])
+                    incoming = asdict(txn)
                     extras = data.get("extras") or {}
-                    extras.update(txn.extras or {})
+                    extras.update(incoming.pop("extras") or {})
+                    for key, value in incoming.items():
+                        if not value:
+                            continue
+                        if key == "brand" or not data.get(key):
+                            data[key] = value
                     data["extras"] = extras
                     conn.execute(
                         "UPDATE notifications SET payload_json = ? WHERE transaction_id = ?",

@@ -82,28 +82,66 @@ def normalize_status(value: str) -> str:
     return STATUS_MAP.get(key, value.title() if value else "")
 
 
-def resolve_brand(*parts: str, default: str = "") -> str:
-    """Return the first allow-listed brand found in tags/text, else default.
+_SKIP_BRAND_TOKENS = {
+    "COPY",
+    "DEPOSIT",
+    "WITHDRAW",
+    "WITHDRAWAL",
+    "UNCLAIM",
+    "MANUAL",
+    "CREATED",
+    "PROCESSED",
+    "USERNAME",
+    "NAME",
+    "MOBILE",
+    "AMOUNT",
+    "BANK",
+    "METHOD",
+    "DATETIME",
+    "GATEWAY",
+    "PAYID",
+    "BANKLOCK",
+    "BANKBSB",
+}
 
-    Tags such as FUCKSPINVIPC / FUCKSPINVIPA map to FUCKSPIN.
-    Labels like NETLOSSN or [JKFCKSPNAU] are ignored.
+
+def first_brand_tag(*parts: str) -> str:
+    """Return the first dashboard brand badge, ignoring NETLOSS labels.
+
+    On the admin site the first black/blue pill after the player name is the
+    brand (e.g. FUCKFUCKVIPC). The second pill is a loss tag such as NETLOSSB.
     """
-    hay = " ".join(part.upper() for part in parts if part)
-    if not hay:
-        return default
-    for brand in sorted(ALLOWED_BRANDS, key=len, reverse=True):
-        if brand in hay:
-            return brand
-    return default
+    for part in parts:
+        for token in re.split(r"[\s,|/]+", part or ""):
+            tag = token.strip("[]() ")
+            if len(tag) < 3 or len(tag) > 40:
+                continue
+            upper = tag.upper()
+            if upper.startswith("NETLOSS") or upper in _SKIP_BRAND_TOKENS:
+                continue
+            if not any(ch.isalpha() for ch in tag):
+                continue
+            if re.fullmatch(r"[A-Za-z0-9._-]+", tag):
+                return upper
+    return ""
 
 
-def normalize_brand(value: str, settings: Settings) -> str:
-    allowed = settings.allowed_brands or ALLOWED_BRANDS
+def resolve_brand(*parts: str, default: str = "") -> str:
+    """Return the first brand badge from the given tags, else default."""
+    return first_brand_tag(*parts) or default
+
+
+def captured_brand(value: str) -> str:
     raw = (value or "").strip()
-    mapped = settings.brand_aliases.get(raw.upper())
-    if mapped and mapped.upper() in {item.upper() for item in allowed}:
-        return mapped
-    return resolve_brand(raw, default="")
+    if not raw:
+        return ""
+    return first_brand_tag(raw) or (
+        raw.upper() if not raw.upper().startswith("NETLOSS") else ""
+    )
+
+
+def normalize_brand(value: str, settings: Settings | None = None) -> str:
+    return captured_brand(value)
 
 
 def is_withdraw(status: object) -> bool:
