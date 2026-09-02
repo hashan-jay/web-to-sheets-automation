@@ -6,8 +6,10 @@ from src.errors import ConfigError
 from src.sheets import (
     bank_clear_range,
     day_tab_candidates,
+    find_header_row,
     index_sheet_ids,
     new_rows_only,
+    next_append_row,
     office_file_error,
 )
 
@@ -49,6 +51,17 @@ class SheetDedupeTests(unittest.TestCase):
         self.assertIsInstance(mapped, ConfigError)
         self.assertIn("Excel", str(mapped))
         self.assertIsNone(office_file_error(Exception("unrelated")))
+
+    def test_writes_below_template_headings(self) -> None:
+        days = ["RIOSK DWP", "DAY", "2", "2", "2"]
+        dates = ["", "DATE", "", "", ""]
+        ids = ["", "ID", "", "", ""]
+        header = find_header_row(days, dates, ids)
+        self.assertEqual(header, 2)
+        self.assertEqual(next_append_row(ids, header), 3)
+        self.assertEqual(next_append_row(["", "ID", "17110853300", ""], header), 4)
+        self.assertEqual(next_append_row(["ID", "17110853300"], 1), 3)
+        self.assertEqual(next_append_row([], 0), 1)
 
     def test_bank_clear_range_skips_header(self) -> None:
         start, end = bank_clear_range(["ID", "17110853300", "17110853301"])

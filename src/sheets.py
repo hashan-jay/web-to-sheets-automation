@@ -101,8 +101,10 @@ class SheetClient:
         raise last_error or RuntimeError("Google Sheets read failed.")
 
     def next_empty_row(self) -> int:
+        days = self.ws.col_values(1)
+        dates = self.ws.col_values(2)
         ids = self.ws.col_values(7)
-        return len(ids) + 1
+        return next_append_row(ids, find_header_row(days, dates, ids))
 
     def clear_bank_names(self) -> int:
         last_error: Exception | None = None
@@ -151,6 +153,37 @@ class SheetClient:
                     raise
                 time.sleep(20 * (attempt + 1))
         raise last_error or RuntimeError("Google Sheets write failed.")
+
+
+def _cell(column: list[str], index: int) -> str:
+    if index >= len(column):
+        return ""
+    return str(column[index] or "").strip().lower()
+
+
+def find_header_row(day_col: list[str], date_col: list[str], id_col: list[str]) -> int:
+    """1-based row of the DAY/DATE/ID heading, or 0 if the tab has no header."""
+    length = max(len(day_col), len(date_col), len(id_col), 0)
+    for index in range(length):
+        day = _cell(day_col, index)
+        date = _cell(date_col, index)
+        txn_id = _cell(id_col, index)
+        if txn_id == "id" and (day == "day" or date == "date"):
+            return index + 1
+    for index in range(length):
+        if _cell(id_col, index) == "id":
+            return index + 1
+    return 0
+
+
+def next_append_row(id_col: list[str], header_row: int = 0) -> int:
+    """First row below the headings that does not already have a transaction ID."""
+    first_allowed = header_row + 1 if header_row else 1
+    last_data = header_row
+    for index, value in enumerate(id_col, start=1):
+        if str(value).strip().isdigit():
+            last_data = index
+    return max(last_data + 1, first_allowed)
 
 
 def bank_clear_range(ids: list[str]) -> tuple[int, int]:
