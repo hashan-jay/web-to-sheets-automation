@@ -44,10 +44,24 @@ def login_slot(raw: object) -> int:
 def login_account_keys(slot: int) -> dict[str, str]:
     number = login_slot(slot)
     return {
+        "website": f"LOGIN_{number}_URL",
         "username": f"LOGIN_{number}_USERNAME",
         "password": f"LOGIN_{number}_PASSWORD",
         "twofa": f"LOGIN_{number}_2FA",
     }
+
+
+def normalize_dashboard_url(raw: object) -> str:
+    url = str(raw or "").strip()
+    if not url:
+        return ""
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+    if "#login" in url:
+        url = url.replace("#login", "#transactions")
+    elif "#" not in url:
+        url = url.rstrip("/") + "/#transactions"
+    return url
 
 
 def load_login_accounts() -> list[dict[str, str]]:
@@ -58,18 +72,22 @@ def load_login_accounts() -> list[dict[str, str]]:
         accounts.append(
             {
                 "slot": str(slot),
+                "website": normalize_dashboard_url(os.getenv(keys["website"], "")),
                 "username": os.getenv(keys["username"], "").strip(),
                 "password": os.getenv(keys["password"], ""),
                 "twofa": os.getenv(keys["twofa"], "").strip(),
             }
         )
-    if not accounts[0]["username"]:
+    if not accounts[0]["username"] and not accounts[0]["website"]:
         accounts[0] = {
             "slot": "1",
+            "website": normalize_dashboard_url(os.getenv("DASHBOARD_URL", "")),
             "username": os.getenv("DASHBOARD_USERNAME", "").strip(),
             "password": os.getenv("DASHBOARD_PASSWORD", ""),
             "twofa": os.getenv("DASHBOARD_2FA", "").strip(),
         }
+    elif not accounts[0]["website"]:
+        accounts[0]["website"] = normalize_dashboard_url(os.getenv("DASHBOARD_URL", ""))
     return accounts
 
 
@@ -78,15 +96,20 @@ def active_login_slot() -> int:
     return login_slot(os.getenv("LOGIN_ACTIVE_SLOT", "1"))
 
 
-def persist_login_account(slot: int, username: str, password: str, twofa: str) -> None:
+def persist_login_account(
+    slot: int, website: str, username: str, password: str, twofa: str
+) -> None:
     number = login_slot(slot)
     keys = login_account_keys(number)
+    url = normalize_dashboard_url(website)
     persist_env_values(
         {
+            keys["website"]: url,
             keys["username"]: username,
             keys["password"]: password,
             keys["twofa"]: twofa,
             "LOGIN_ACTIVE_SLOT": str(number),
+            "DASHBOARD_URL": url,
             "DASHBOARD_USERNAME": username,
             "DASHBOARD_PASSWORD": password,
             "DASHBOARD_2FA": twofa,

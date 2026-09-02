@@ -90,10 +90,12 @@ from src.config import (
     Settings,
     active_login_slot,
     load_login_accounts,
+    normalize_dashboard_url,
     persist_login_account,
 )
 from src.database import GatheringDB, _transaction_from_payload
 from src.mapper import record_local_datetime, sheet_tab_name
+from src.sheets import SheetClient
 from src.pipeline import (
     process_new_notifications_only,
     run_pipeline,
@@ -128,9 +130,14 @@ class FinanceAutomationApp:
         self.capturing_latest = False
         self.bulk_loading = False
         self.latest_run_ids: set[str] = set()
+        self.sheet_id_cache: set[str] = set()
+        self.sheet_id_cache_date = ""
         self.login_accounts = load_login_accounts()
         self.active_account = tk.IntVar(value=active_login_slot())
         active = self.login_accounts[self.active_account.get() - 1]
+        self.login_website = tk.StringVar(
+            value=active.get("website") or self.settings.dashboard_url
+        )
         self.login_username = tk.StringVar(
             value=active["username"] or self.settings.dashboard_username
         )
@@ -144,6 +151,7 @@ class FinanceAutomationApp:
         self.account_use_btns: list[ttk.Button] = []
         self.arm_watcher_after_run = False
         self.open_sent_after_send = False
+        self._prefer_sent_tab = False
         self.row_store: dict[tuple[str, str], dict] = {}
         self.date_filter = tk.StringVar(value=local_today())
         self.filter_caption = tk.StringVar(value="Showing today's Completed records")
@@ -259,11 +267,10 @@ class FinanceAutomationApp:
         side_canvas.bind("<Leave>", lambda _event: side_canvas.unbind_all("<MouseWheel>"))
 
         ttk.Label(sidebar, text="Website login", style="CardTitle.TLabel").pack(anchor="w")
-        ttk.Label(sidebar, text="https://skgaming16.as6868.com/#login", style="Muted.TLabel").pack(
-            anchor="w", pady=(2, 8)
-        )
-        ttk.Label(sidebar, textvariable=self.status_text, style="Muted.TLabel").pack(anchor="w", pady=(0, 8))
+        ttk.Label(sidebar, textvariable=self.status_text, style="Muted.TLabel").pack(anchor="w", pady=(2, 8))
 
+        ttk.Label(sidebar, text="Website", style="Muted.TLabel").pack(anchor="w")
+        ttk.Entry(sidebar, textvariable=self.login_website, width=28).pack(fill="x", pady=(2, 6))
         ttk.Label(sidebar, text="Username", style="Muted.TLabel").pack(anchor="w")
         ttk.Entry(sidebar, textvariable=self.login_username, width=28).pack(fill="x", pady=(2, 6))
         ttk.Label(sidebar, text="Password", style="Muted.TLabel").pack(anchor="w")
@@ -274,7 +281,7 @@ class FinanceAutomationApp:
         ttk.Label(sidebar, text="Saved accounts (3)", style="CardTitle.TLabel").pack(anchor="w")
         ttk.Label(
             sidebar,
-            text="Click an account to use it, then Run now. Save current writes these fields into that slot.",
+            text="Each account stores website, username, password, and 2FA. Click an account, then Run now.",
             style="Muted.TLabel",
             wraplength=280,
         ).pack(anchor="w", pady=(2, 6))
@@ -550,7 +557,7 @@ class FinanceAutomationApp:
         ttk.Button(controls, text="Clear this scrape", command=self._clear_latest).pack(side="left")
         ttk.Label(
             page,
-            text="This run only. Send writes these rows to Google Sheets and adds them to Google Sheet sent.",
+            text="Shows new and not-yet-sent Completed rows. Already exported IDs stay out of this list. Send writes them to the day tab and into Google Sheet sent.",
             style="Muted.TLabel",
         ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 0))
         self.latest_tree = self._make_tree(page, "latest", ALL_COLUMNS, "ID Transaction")
@@ -744,11 +751,27 @@ class FinanceAutomationApp:
     def _busy(self) -> bool:
         return self.worker is not None and self.worker.is_alive()
 
+    def _account_host(self, website: str) -> str:
+        url = normalize_dashboard_url(website)
+        host = url.split("://", 1)[-1].split("/", 1)[0].split("#", 1)[0]
+        return host or ""
+
     def _account_button_text(self, slot: int) -> str:
         account = self.login_accounts[slot - 1]
         username = account["username"] or "(empty)"
+        host = self._account_host(account.get("website", ""))
         selected = " ●" if slot == self.active_account.get() else ""
+        if host:
+            return f"Account {slot}  {username}  ·  {host}{selected}"
         return f"Account {slot}  {username}{selected}"
+
+    def _account_fields(self) -> tuple[str, str, str, str]:
+        return (
+            normalize_dashboard_url(self.login_website.get()),
+            self.login_username.get().strip(),
+            self.login_password.get(),
+            self.login_2fa.get().strip(),
+        )
 
     def _refresh_account_buttons(self) -> None:
         for slot, button in enumerate(self.account_use_btns, start=1):
@@ -756,59 +779,73 @@ class FinanceAutomationApp:
 
     def _select_account(self, slot: int) -> None:
         account = self.login_accounts[slot - 1]
-        if not account["username"] and not account["password"]:
+        if not account["username"] and not account["password"] and not account.get("website"):
             messagebox.showinfo(
                 f"Account {slot} is empty",
-                "Enter username, password, and 2FA above, then click Save on this account.",
+                "Enter website, username, password, and 2FA above, then click Save on this account.",
             )
             return
         self.active_account.set(slot)
+        self.login_website.set(account.get("website", ""))
         self.login_username.set(account["username"])
         self.login_password.set(account["password"])
         self.login_2fa.set(account["twofa"])
         self.saved_username = account["username"]
         self.saved_password = account["password"]
         self.saved_2fa = account["twofa"]
-        persist_login_account(slot, account["username"], account["password"], account["twofa"])
+        persist_login_account(
+            slot,
+            account.get("website", ""),
+            account["username"],
+            account["password"],
+            account["twofa"],
+        )
         self._refresh_account_buttons()
-        self._append_log(f"Using saved Account {slot} ({account['username'] or 'no username'}).")
+        host = self._account_host(account.get("website", ""))
+        self._append_log(
+            f"Using saved Account {slot} ({account['username'] or 'no username'}"
+            + (f" on {host}" if host else "")
+            + ")."
+        )
 
     def _save_account(self, slot: int) -> None:
-        username = self.login_username.get().strip()
-        password = self.login_password.get()
-        twofa = self.login_2fa.get().strip()
-        if not username or not password:
+        website, username, password, twofa = self._account_fields()
+        if not website or not username or not password:
             messagebox.showwarning(
                 "Nothing to save",
-                "Enter a username and password before saving this account.",
+                "Enter a website, username, and password before saving this account.",
             )
             return
+        self.login_website.set(website)
         self.active_account.set(slot)
         self.login_accounts[slot - 1] = {
             "slot": str(slot),
+            "website": website,
             "username": username,
             "password": password,
             "twofa": twofa,
         }
-        persist_login_account(slot, username, password, twofa)
+        persist_login_account(slot, website, username, password, twofa)
         self.saved_username = username
         self.saved_password = password
         self.saved_2fa = twofa
         self._refresh_account_buttons()
-        self._append_log(f"Saved current login fields to Account {slot} ({username}).")
+        self._append_log(
+            f"Saved current login fields to Account {slot} ({username} on {self._account_host(website)})."
+        )
 
     def _persist_login_fields(self) -> None:
-        username = self.login_username.get().strip()
-        password = self.login_password.get()
-        twofa = self.login_2fa.get().strip()
+        website, username, password, twofa = self._account_fields()
+        self.login_website.set(website)
         slot = self.active_account.get()
         self.login_accounts[slot - 1] = {
             "slot": str(slot),
+            "website": website,
             "username": username,
             "password": password,
             "twofa": twofa,
         }
-        persist_login_account(slot, username, password, twofa)
+        persist_login_account(slot, website, username, password, twofa)
         self.saved_username = username
         self.saved_password = password
         self.saved_2fa = twofa
@@ -912,6 +949,7 @@ class FinanceAutomationApp:
         settings.headed = not self.headless.get()
         settings.use_open_browser = False
         settings.poll_interval_seconds = int(self.poll_interval.get() or 60)
+        settings.dashboard_url = normalize_dashboard_url(self.login_website.get())
         settings.dashboard_username = self.login_username.get().strip()
         settings.dashboard_password = self.login_password.get()
         code = "".join(ch for ch in self.login_2fa.get() if ch.isdigit())
@@ -929,11 +967,17 @@ class FinanceAutomationApp:
                 "Click Stop Automated Run before using Run now.",
             )
             return False
+        if not normalize_dashboard_url(self.login_website.get()):
+            messagebox.showwarning(
+                "Website required",
+                "Enter the dashboard website for this account before running.",
+            )
+            return False
         if not self.login_username.get().strip() or not self.login_password.get():
             messagebox.showwarning(
                 "Login required",
                 "Enter username and password in the Website login section, "
-                "or click the saved details to fill them.",
+                "or click a saved account.",
             )
             return False
         if not self.scrape_deposits.get() and not self.scrape_withdrawals.get():
@@ -1020,7 +1064,7 @@ class FinanceAutomationApp:
         self.pages.select(0)
         self._append_log(
             f"Automated Run tick: scraping Completed for {self._scrape_date()}. "
-            "Skipping IDs already in Latest scrape or already saved."
+            "Skipping IDs already on the Google Sheet."
         )
         try:
             self._start_job(scrape=True, write_sheet=False)
@@ -1028,18 +1072,138 @@ class FinanceAutomationApp:
             self._append_log(f"Automated Run tick failed: {exc}")
             self._schedule_next_auto()
 
-    def _already_scraped(self, txn_id: str) -> bool:
+    def _already_on_sheet(self, txn_id: str) -> bool:
         if not txn_id:
             return False
-        if txn_id in self.latest_run_ids:
-            return True
-        for (section, _item), rec in self.row_store.items():
-            if section == "latest":
-                continue
+        selected = self.date_filter.get()
+        if self.sheet_id_cache and (
+            not self.sheet_id_cache_date
+            or selected in {"", "All dates"}
+            or self.sheet_id_cache_date == selected
+        ):
+            if txn_id in self.sheet_id_cache:
+                return True
+        for rec in self._section_records("sent"):
             values = rec.get("values") or ()
             if len(values) > 1 and str(values[1]) == txn_id:
-                return True
+                status = str((rec.get("tags") or ("",))[0])
+                if status in {"Copied", "Skipped"}:
+                    return True
         return False
+
+    def _event_from_rec(self, rec: dict, status: str, detail: str) -> dict:
+        values = rec.get("values") or ()
+
+        def col(index: int) -> str:
+            return str(values[index]) if len(values) > index else ""
+
+        return {
+            "transaction_id": col(1),
+            "username": col(2),
+            "name": col(3),
+            "mobile": col(4),
+            "amount": col(5),
+            "type": rec.get("type") or col(6),
+            "bank": col(7),
+            "acc_name": col(8),
+            "acc_no": col(9),
+            "bsb": col(10),
+            "pay_id": col(11),
+            "bank_lock": col(12),
+            "method": col(13),
+            "brand": col(14),
+            "datetime": col(0),
+            "created": col(15),
+            "processed": col(16),
+            "tally_date": rec.get("date") or "",
+            "status": status,
+            "detail": detail,
+        }
+
+    def _remove_latest_id(self, txn_id: str) -> None:
+        store_key = self._item_key("latest", txn_id)
+        if store_key in self.row_items:
+            _section, item = self.row_items.pop(store_key)
+            tree = self._tree_for("latest")
+            if tree.exists(item):
+                tree.delete(item)
+            self.row_store.pop(("latest", item), None)
+        self.latest_run_ids.discard(txn_id)
+
+    def _refresh_unsent_latest(self, log: bool = True) -> None:
+        dated = self._dated(self._section_records("deposit")) + self._dated(
+            self._section_records("withdraw")
+        )
+        by_id: dict[str, dict] = {}
+        for rec in dated:
+            values = rec.get("values") or ()
+            txn_id = str(values[1] if len(values) > 1 else "")
+            if txn_id:
+                by_id[txn_id] = rec
+        if not by_id:
+            return
+        unsent = [rec for txn_id, rec in by_id.items() if not self._already_on_sheet(txn_id)]
+        for txn_id in list(self.latest_run_ids):
+            if txn_id in by_id and self._already_on_sheet(txn_id):
+                self._remove_latest_id(txn_id)
+        for rec in unsent:
+            values = rec.get("values") or ()
+            txn_id = str(values[1] if len(values) > 1 else "")
+            if not txn_id:
+                continue
+            self.latest_run_ids.add(txn_id)
+            self._upsert_row(
+                self._event_from_rec(rec, "Gathered", "Not sent to Google Sheet yet"),
+                bucket="latest",
+            )
+        missing = len(unsent)
+        extracted = len(by_id)
+        sent = extracted - missing
+        if log:
+            if missing:
+                self._append_log(
+                    f"{missing} extracted record(s) are not on the Google Sheet. "
+                    f"They are listed in Latest scrape ({extracted} extracted · {sent} already sent)."
+                )
+            else:
+                self._append_log(
+                    f"All {extracted} extracted record(s) for this date are on the Google Sheet."
+                )
+        if missing and not self._prefer_sent_tab:
+            self.pages.select(0)
+        self._update_filter_caption()
+
+    def _queue_sheet_unsent_check(self) -> None:
+        day = self.date_filter.get().strip() or local_today()
+        if day in {"", "All dates", "(blank)"}:
+            day = self.website_date or local_today()
+        self._refresh_unsent_latest(log=False)
+
+        def work() -> None:
+            try:
+                settings = self._current_settings()
+                settings.require_sheets()
+                sheet = SheetClient(
+                    settings.google_credentials_path,
+                    settings.google_sheet_id,
+                    settings.google_worksheet,
+                )
+                sheet.use_day(day)
+                ids = sheet.existing_ids()
+                self.events.put(
+                    {
+                        "kind": "sheet_ids",
+                        "ids": list(ids),
+                        "date": day,
+                        "count": len(ids),
+                    }
+                )
+            except Exception as exc:
+                self.events.put(
+                    {"kind": "log", "message": f"Could not compare Google Sheet IDs: {exc}"}
+                )
+
+        threading.Thread(target=work, name="sheet-unsent", daemon=True).start()
 
     def _run_now(self) -> None:
         if not self._scrape_ready("Run now"):
@@ -1161,7 +1325,7 @@ class FinanceAutomationApp:
         self.status_text.set("Running...")
         settings = self._current_settings()
         self._append_log(
-            f"Logging in as {settings.dashboard_username} "
+            f"Opening {settings.dashboard_url} as {settings.dashboard_username} "
             f"and gathering Completed transactions for {settings.filter_date_from}. "
             "The sheet is not updated yet."
         )
@@ -1218,7 +1382,7 @@ class FinanceAutomationApp:
             status = str(event.get("status") or "")
             txn_id = str(event.get("transaction_id") or "")
             if self.capturing_latest and status == "Gathered" and self._type_wanted(event.get("type")):
-                if txn_id and self._already_scraped(txn_id):
+                if txn_id and self._already_on_sheet(txn_id):
                     pass
                 else:
                     if txn_id:
@@ -1248,7 +1412,15 @@ class FinanceAutomationApp:
             self.sheet_date_count = int(event.get("sheet_count") or 0)
             self.sheet_tally_date = str(event.get("date") or "")
             self._update_match_caption()
+        if kind == "sheet_ids":
+            self.sheet_id_cache = {str(item) for item in (event.get("ids") or []) if item}
+            self.sheet_id_cache_date = str(event.get("date") or "")
+            self.sheet_date_count = int(event.get("count") or len(self.sheet_id_cache))
+            if self.sheet_id_cache_date:
+                self.sheet_tally_date = self.sheet_id_cache_date
+            self._refresh_unsent_latest()
         if kind == "done":
+            self._prefer_sent_tab = self.open_sent_after_send
             self._refresh_counts()
             self._reload_workspace()
             if self.open_sent_after_send:
@@ -1260,6 +1432,7 @@ class FinanceAutomationApp:
             else:
                 self.capturing_latest = False
                 self.status_text.set("Idle")
+            self._queue_sheet_unsent_check()
 
     def _row_values(self, event: dict, stamp: str | None = None) -> tuple:
         when = record_local_datetime(
@@ -1432,8 +1605,16 @@ class FinanceAutomationApp:
             else "Website Completed Record: —"
         )
         compare_date = self.website_date or date_sel
-        match = "match" if website and website == len(gui_ids) else "not matched yet"
-        sent_match = "match" if website and website == len(sent_ids) else "not sent in full"
+        scraped = len(gui_ids)
+        sent = len(sent_ids)
+        scrape_match = bool(website) and website == scraped
+        sheet_match = bool(website) and website == sent and scraped == sent
+        if website and scrape_match and sheet_match:
+            tally = "ALL MATCH"
+        elif website and scrape_match:
+            tally = "scrape matches Completed · sheet not sent in full"
+        else:
+            tally = "not matched yet"
         sheet_bit = ""
         if self.sheet_date_count and (not self.sheet_tally_date or self.sheet_tally_date in {compare_date, date_sel, self.sent_date_filter.get()}):
             sheet_live = (
@@ -1443,9 +1624,9 @@ class FinanceAutomationApp:
             )
             sheet_bit = f"  ·  Google Sheet live: {self.sheet_date_count} txn ({sheet_live})"
         self.match_caption.set(
-            f"{website_bit}  ·  GUI {compare_date}: {len(gui_ids)} txn ({match})  ·  "
+            f"{website_bit}  ·  Scraped {compare_date}: {scraped} txn  ·  "
             f"Latest scrape: {len(latest_ids)}  ·  "
-            f"Google Sheet sent: {len(sent_ids)} txn ({sent_match})"
+            f"Google Sheet sent: {sent} txn  ·  {tally}"
             f"{sheet_bit}"
         )
 
@@ -1689,6 +1870,7 @@ class FinanceAutomationApp:
 
     def _load_recent_rows(self) -> None:
         self._reload_workspace()
+        self._queue_sheet_unsent_check()
 
     def _on_close(self) -> None:
         self.auto_running = False
