@@ -394,6 +394,16 @@ def _write_day_rows(
         )
     try:
         sheet.write_rows(rows)
+        start = getattr(sheet, "last_write_start", 0)
+        if start:
+            _emit(
+                on_event,
+                kind="log",
+                message=(
+                    f"Wrote {len(to_copy)} row(s) on tab {sheet.tab_title()} "
+                    f"starting at row {start}."
+                ),
+            )
     except Exception as exc:
         for txn in to_copy:
             db.mark(txn.transaction_id, "failed", str(exc))

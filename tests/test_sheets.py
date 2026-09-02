@@ -62,6 +62,8 @@ class SheetDedupeTests(unittest.TestCase):
         )
         ids = [""] * 103 + ["ID", "17110853300", "17110853301"]
         self.assertEqual(next_append_row(ids, first_data_row=105), 107)
+        junk_at_bottom = [""] * 103 + ["ID"] + [""] * 50 + ["17110853300"]
+        self.assertEqual(next_append_row(junk_at_bottom, first_data_row=105), 105)
         self.assertEqual(next_append_row(["ID", "17110853300"], 1), 3)
 
     def test_bank_clear_range_skips_header(self) -> None:

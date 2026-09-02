@@ -16,7 +16,11 @@ LEDGER_TITLE_MARKERS = ("group u aud september",)
 
 
 def uses_ledger_start(spreadsheet_title: str) -> bool:
-    title = (spreadsheet_title or "").strip().lower()
+    title = " ".join(
+        (spreadsheet_title or "").strip().lower().replace("-", " ").replace("_", " ").split()
+    )
+    if "group u" in title and "september" in title:
+        return True
     return any(marker in title for marker in LEDGER_TITLE_MARKERS)
 
 
@@ -64,6 +68,7 @@ class SheetClient:
             self._ledger_start = (
                 LEDGER_FIRST_DATA_ROW if uses_ledger_start(self.spreadsheet.title) else 0
             )
+            self.last_write_start = 0
             self._fallback_title = (worksheet or "").strip()
             if self._fallback_title:
                 self.ws = self.spreadsheet.worksheet(self._fallback_title)
@@ -114,8 +119,10 @@ class SheetClient:
 
     def next_empty_row(self) -> int:
         ids = self.ws.col_values(7)
-        if self._ledger_start:
-            return next_append_row(ids, first_data_row=self._ledger_start)
+        days = self.ws.col_values(1) if not self._ledger_start else []
+        start_at = self._ledger_start or header_locked_data_row(days, ids)
+        if start_at:
+            return next_append_row(ids, first_data_row=start_at)
         return len(ids) + 1
 
     def clear_bank_names(self) -> int:
@@ -151,7 +158,10 @@ class SheetClient:
         for attempt in range(4):
             try:
                 start = self.next_empty_row()
+                if self._ledger_start or uses_ledger_start(self.spreadsheet.title):
+                    start = max(start, LEDGER_FIRST_DATA_ROW)
                 end = start + len(values) - 1
+                self.last_write_start = start
                 self.ws.update(
                     range_name=f"A{start}:L{end}",
                     values=values,
@@ -171,6 +181,16 @@ def _cell(column: list[str], index: int) -> str:
     if index >= len(column):
         return ""
     return str(column[index] or "").strip().lower()
+
+
+def header_locked_data_row(day_col: list[str], id_col: list[str]) -> int:
+    """Return 105 when the DAY/ID heading sits on row 104."""
+    header_index = LEDGER_FIRST_DATA_ROW - 2
+    day = _cell(day_col, header_index)
+    txn_id = _cell(id_col, header_index)
+    if day == "day" or txn_id == "id":
+        return LEDGER_FIRST_DATA_ROW
+    return 0
 
 
 def find_header_row(day_col: list[str], date_col: list[str], id_col: list[str]) -> int:
@@ -197,11 +217,12 @@ def next_append_row(
     Other sheets keep their existing append-after-last-ID behavior.
     """
     if first_data_row:
-        last_data = first_data_row - 1
-        for index, value in enumerate(id_col, start=1):
-            if index >= first_data_row and str(value).strip().isdigit():
-                last_data = index
-        return max(last_data + 1, first_data_row)
+        row = first_data_row
+        while True:
+            value = id_col[row - 1] if row <= len(id_col) else ""
+            if not str(value).strip().isdigit():
+                return max(row, first_data_row)
+            row += 1
     first_allowed = header_row + 1 if header_row else 1
     last_data = header_row
     for index, value in enumerate(id_col, start=1):
