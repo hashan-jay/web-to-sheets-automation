@@ -107,7 +107,7 @@ class MapperTests(unittest.TestCase):
             [
                 "28",
                 "2026-08-28 23:30",
-                "ANZPLUS O'NEILL R W",
+                "",
                 "Caleb William Needham",
                 "30",
                 "Deposit",
@@ -181,7 +181,7 @@ class MapperTests(unittest.TestCase):
         self.assertEqual(row[SHEET_COL_PLAYER], "A51088178")
         self.assertEqual(deposit[SHEET_COL_PLAYER], "A1")
         self.assertEqual(row[2], "")
-        self.assertEqual(deposit[2], "ANZPLUS O'NEILL R W")
+        self.assertEqual(deposit[2], "")
         self.assertEqual(sheet_status("WITHDRAWAL"), "Withdraw")
         self.assertEqual(sheet_amount("50", "WITHDRAW"), "-50")
         self.assertEqual(sheet_amount("-50", "WITHDRAWAL"), "-50")

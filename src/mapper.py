@@ -163,9 +163,7 @@ def sheet_amount(amount: object, status: object) -> str:
 
 
 def sheet_bank(txn: Transaction, settings: Settings) -> str:
-    if is_withdraw(txn.status):
-        return ""
-    return (settings.default_bank_account or txn.bank or "").strip()
+    return ""
 
 
 def sheet_description(txn: Transaction) -> str:
