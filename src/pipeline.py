@@ -183,13 +183,20 @@ def copy_pending_to_sheet(
         return result
 
     settings.require_sheets()
-    sheet = SheetClient(
-        settings.google_credentials_path,
-        settings.google_sheet_id,
-        settings.google_worksheet,
-    )
-    for day, txns in _group_by_day(pending, settings.filter_date_from).items():
-        _write_day_rows(settings, db, sheet, day, txns, result, on_event, action="Copied")
+    groups = _group_by_day(pending, settings.filter_date_from)
+    for sheet_id in settings.sheet_ids():
+        sheet = SheetClient(
+            settings.google_credentials_path,
+            sheet_id,
+            settings.google_worksheet,
+        )
+        _emit(
+            on_event,
+            kind="log",
+            message=f"Sending to Google Sheet {sheet.spreadsheet.title}.",
+        )
+        for day, txns in groups.items():
+            _write_day_rows(settings, db, sheet, day, txns, result, on_event, action="Copied")
     return result
 
 
@@ -298,18 +305,24 @@ def sync_date_to_sheet(
         return result
 
     settings.require_sheets()
-    sheet = SheetClient(
-        settings.google_credentials_path,
-        settings.google_sheet_id,
-        settings.google_worksheet,
-    )
     groups = (
         _group_by_day(candidates, settings.filter_date_from)
         if day in {"", "All dates"}
         else {day: candidates}
     )
-    for one_day, txns in groups.items():
-        _sync_one_day(settings, db, sheet, one_day, txns, result, on_event)
+    for sheet_id in settings.sheet_ids():
+        sheet = SheetClient(
+            settings.google_credentials_path,
+            sheet_id,
+            settings.google_worksheet,
+        )
+        _emit(
+            on_event,
+            kind="log",
+            message=f"Syncing to Google Sheet {sheet.spreadsheet.title}.",
+        )
+        for one_day, txns in groups.items():
+            _sync_one_day(settings, db, sheet, one_day, txns, result, on_event)
     _emit(
         on_event,
         kind="done",

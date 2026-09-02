@@ -28,15 +28,38 @@ def find_day_worksheet(spreadsheet, day_number: str):
     return None
 
 
+def office_file_error(exc: Exception) -> ConfigError | None:
+    text = str(exc)
+    if "must not be an Office file" not in text and "not supported for this document" not in text:
+        return None
+    return ConfigError(
+        "This file is still an Excel (.xlsx) Office file on Google Drive. "
+        "This app can only write to a native Google Sheet. "
+        "Open the file in Drive → File → Save as Google Sheets, "
+        "then paste that new spreadsheet URL into Sheet 1 or Sheet 2 and share it "
+        "with the service account as Editor."
+    )
+
+
+def raise_if_office_file(exc: Exception) -> None:
+    mapped = office_file_error(exc)
+    if mapped:
+        raise mapped from exc
+
+
 class SheetClient:
     def __init__(self, credentials_path: Path, sheet_id: str, worksheet: str = "") -> None:
         client = gspread.service_account(filename=str(credentials_path))
-        self.spreadsheet = client.open_by_key(sheet_id)
-        self._fallback_title = (worksheet or "").strip()
-        if self._fallback_title:
-            self.ws = self.spreadsheet.worksheet(self._fallback_title)
-        else:
-            self.ws = self.spreadsheet.sheet1
+        try:
+            self.spreadsheet = client.open_by_key(sheet_id)
+            self._fallback_title = (worksheet or "").strip()
+            if self._fallback_title:
+                self.ws = self.spreadsheet.worksheet(self._fallback_title)
+            else:
+                self.ws = self.spreadsheet.sheet1
+        except APIError as exc:
+            raise_if_office_file(exc)
+            raise
 
     def use_day(self, day: str):
         tab = sheet_tab_name(day)
@@ -50,7 +73,11 @@ class SheetClient:
             self.ws = found
             return self.ws
         title = day_tab_candidates(tab)[0]
-        self.ws = self.spreadsheet.add_worksheet(title=title, rows=2000, cols=16)
+        try:
+            self.ws = self.spreadsheet.add_worksheet(title=title, rows=2000, cols=16)
+        except APIError as exc:
+            raise_if_office_file(exc)
+            raise
         return self.ws
 
     def tab_title(self) -> str:
@@ -66,6 +93,7 @@ class SheetClient:
             try:
                 return index_sheet_ids(self.ws.col_values(2), self.ws.col_values(7))
             except APIError as exc:
+                raise_if_office_file(exc)
                 last_error = exc
                 if "429" not in str(exc) or attempt == 3:
                     raise
@@ -117,6 +145,7 @@ class SheetClient:
                 )
                 return len(rows)
             except APIError as exc:
+                raise_if_office_file(exc)
                 last_error = exc
                 if "429" not in str(exc) or attempt == 3:
                     raise

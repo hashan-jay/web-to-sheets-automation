@@ -2,7 +2,14 @@ import unittest
 
 from src.mapper import SHEET_COL_COUNT, pad_sheet_row
 from src.models import Transaction
-from src.sheets import bank_clear_range, day_tab_candidates, index_sheet_ids, new_rows_only
+from src.errors import ConfigError
+from src.sheets import (
+    bank_clear_range,
+    day_tab_candidates,
+    index_sheet_ids,
+    new_rows_only,
+    office_file_error,
+)
 
 
 class SheetDedupeTests(unittest.TestCase):
@@ -34,6 +41,14 @@ class SheetDedupeTests(unittest.TestCase):
         self.assertEqual(day_tab_candidates("29"), ["29"])
         self.assertEqual(day_tab_candidates("9"), ["9", "09"])
         self.assertEqual(day_tab_candidates("09"), ["9", "09"])
+
+    def test_office_file_error_explains_xlsx(self) -> None:
+        mapped = office_file_error(
+            Exception("APIError: [400]: This operation is not supported for this document. The document must not be an Office file.")
+        )
+        self.assertIsInstance(mapped, ConfigError)
+        self.assertIn("Excel", str(mapped))
+        self.assertIsNone(office_file_error(Exception("unrelated")))
 
     def test_bank_clear_range_skips_header(self) -> None:
         start, end = bank_clear_range(["ID", "17110853300", "17110853301"])

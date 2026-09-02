@@ -2,9 +2,11 @@ import unittest
 
 from src.config import (
     LOGIN_ACCOUNT_SLOTS,
+    google_sheet_url,
     login_account_keys,
     login_slot,
     normalize_dashboard_url,
+    normalize_google_sheet_id,
 )
 
 
@@ -33,6 +35,24 @@ class LoginAccountTests(unittest.TestCase):
             "https://other.example.com/#transactions",
         )
         self.assertEqual(normalize_dashboard_url(""), "")
+
+    def test_normalize_google_sheet_id(self) -> None:
+        self.assertEqual(
+            normalize_google_sheet_id(
+                "https://docs.google.com/spreadsheets/d/1BAXqHMZAP9-sVXGn_up32CkmOmwLiPAxDnYf3yqZiRo/edit"
+            ),
+            "1BAXqHMZAP9-sVXGn_up32CkmOmwLiPAxDnYf3yqZiRo",
+        )
+        self.assertEqual(
+            normalize_google_sheet_id("1BAXqHMZAP9-sVXGn_up32CkmOmwLiPAxDnYf3yqZiRo"),
+            "1BAXqHMZAP9-sVXGn_up32CkmOmwLiPAxDnYf3yqZiRo",
+        )
+        self.assertEqual(normalize_google_sheet_id(""), "")
+        self.assertTrue(
+            google_sheet_url("1BAXqHMZAP9-sVXGn_up32CkmOmwLiPAxDnYf3yqZiRo").endswith(
+                "/1BAXqHMZAP9-sVXGn_up32CkmOmwLiPAxDnYf3yqZiRo"
+            )
+        )
 
 
 if __name__ == "__main__":

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -10,6 +12,7 @@ from src.errors import ConfigError
 
 ROOT = Path(__file__).resolve().parent.parent
 LOGIN_ACCOUNT_SLOTS = (1, 2, 3)
+_SHEET_URL_RE = re.compile(r"/spreadsheets/d/([a-zA-Z0-9-_]+)")
 
 
 def persist_env_values(updates: dict[str, str]) -> None:
@@ -49,6 +52,31 @@ def login_account_keys(slot: int) -> dict[str, str]:
         "password": f"LOGIN_{number}_PASSWORD",
         "twofa": f"LOGIN_{number}_2FA",
     }
+
+
+def normalize_google_sheet_id(raw: object) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    match = _SHEET_URL_RE.search(text)
+    if match:
+        return match.group(1)
+    if re.fullmatch(r"[a-zA-Z0-9-_]{20,}", text):
+        return text
+    return ""
+
+
+def google_sheet_url(sheet_id: object) -> str:
+    key = normalize_google_sheet_id(sheet_id)
+    return f"https://docs.google.com/spreadsheets/d/{key}" if key else ""
+
+
+def service_account_email(credentials_path: Path) -> str:
+    try:
+        data = json.loads(Path(credentials_path).read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+    return str(data.get("client_email") or "").strip()
 
 
 def normalize_dashboard_url(raw: object) -> str:
@@ -190,6 +218,15 @@ class Settings:
     use_open_browser: bool = True
     auth_state_path: Path = ROOT / "auth_state.json"
     database_path: Path = ROOT / "data" / "gathering.db"
+    google_sheet_id_2: str = ""
+
+    def sheet_ids(self) -> list[str]:
+        ids: list[str] = []
+        for raw in (self.google_sheet_id, self.google_sheet_id_2):
+            key = normalize_google_sheet_id(raw)
+            if key and key not in ids:
+                ids.append(key)
+        return ids
 
     @classmethod
     def load(cls) -> Settings:
@@ -204,8 +241,9 @@ class Settings:
             filter_date_to=os.getenv("FILTER_DATE_TO", "").strip(),
             filter_type=os.getenv("FILTER_TYPE", "ACTIVE").strip(),
             filter_status=os.getenv("FILTER_STATUS", "COMPLETED").strip(),
-            google_sheet_id=os.getenv("GOOGLE_SHEET_ID", "").strip(),
+            google_sheet_id=normalize_google_sheet_id(os.getenv("GOOGLE_SHEET_ID", "")),
             google_worksheet=os.getenv("GOOGLE_WORKSHEET", "").strip(),
+            google_sheet_id_2=normalize_google_sheet_id(os.getenv("GOOGLE_SHEET_ID_2", "")),
             google_credentials_path=_path(
                 "GOOGLE_CREDENTIALS_PATH", "credentials/service-account.json"
             ),

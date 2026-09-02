@@ -90,9 +90,13 @@ STATUS_RANK = {
 from src.config import (
     Settings,
     active_login_slot,
+    google_sheet_url,
     load_login_accounts,
     normalize_dashboard_url,
+    normalize_google_sheet_id,
+    persist_env_values,
     persist_login_account,
+    service_account_email,
 )
 from src.database import GatheringDB, _transaction_from_payload
 from src.mapper import record_local_datetime, sheet_tab_name
@@ -171,6 +175,8 @@ class FinanceAutomationApp:
         self.extend_btn_text = tk.StringVar(value="Show hidden details")
         self.poll_interval = tk.IntVar(value=self.settings.poll_interval_seconds)
         self.auto_interval = tk.IntVar(value=int(self.settings.poll_interval_seconds or 60))
+        self.google_sheet = tk.StringVar(value=google_sheet_url(self.settings.google_sheet_id))
+        self.google_sheet_2 = tk.StringVar(value=google_sheet_url(self.settings.google_sheet_id_2))
         self.auto_running = False
         self._auto_after_id: str | None = None
         self._auto_deadline = 0.0
@@ -355,6 +361,40 @@ class FinanceAutomationApp:
             wraplength=280,
         ).pack(anchor="w", pady=(4, 10))
 
+        ttk.Label(sidebar, text="Google Sheets", style="CardTitle.TLabel").pack(anchor="w", pady=(4, 6))
+        ttk.Label(
+            sidebar,
+            text="Paste a spreadsheet URL or ID. Share each sheet with the service account as Editor. Send writes the same rows to both if Sheet 2 is filled.",
+            style="Muted.TLabel",
+            wraplength=280,
+        ).pack(anchor="w", pady=(0, 6))
+        ttk.Label(sidebar, text="Sheet 1", style="Muted.TLabel").pack(anchor="w")
+        ttk.Entry(sidebar, textvariable=self.google_sheet, width=28).pack(fill="x", pady=(2, 6))
+        ttk.Label(sidebar, text="Sheet 2 (optional copy)", style="Muted.TLabel").pack(anchor="w")
+        ttk.Entry(sidebar, textvariable=self.google_sheet_2, width=28).pack(fill="x", pady=(2, 6))
+        share_email = service_account_email(self.settings.google_credentials_path)
+        ttk.Label(
+            sidebar,
+            text=(
+                f"Share with: {share_email}"
+                if share_email
+                else "Share with the service account email from credentials/service-account.json"
+            ),
+            style="Muted.TLabel",
+            wraplength=280,
+        ).pack(anchor="w", pady=(0, 6))
+        sheet_btns = ttk.Frame(sidebar, style="Card.TFrame")
+        sheet_btns.pack(fill="x", pady=(0, 10))
+        ttk.Button(sheet_btns, text="Save sheets", style="Quick.TButton", command=self._save_google_sheets).pack(
+            fill="x", pady=2
+        )
+        ttk.Button(
+            sheet_btns, text="Open sheet 1", style="Quick.TButton", command=lambda: self._open_google_sheet(1)
+        ).pack(fill="x", pady=2)
+        ttk.Button(
+            sheet_btns, text="Open sheet 2", style="Quick.TButton", command=lambda: self._open_google_sheet(2)
+        ).pack(fill="x", pady=2)
+
         ttk.Label(sidebar, text="Quick actions", style="CardTitle.TLabel").pack(anchor="w", pady=(4, 6))
         ttk.Button(
             sidebar, text="Send deposits to sheet", style="Quick.TButton",
@@ -374,7 +414,7 @@ class FinanceAutomationApp:
         ).pack(fill="x", pady=2)
         ttk.Button(
             sidebar, text="Open Google Sheet", style="Quick.TButton",
-            command=self._open_google_sheet,
+            command=lambda: self._open_google_sheet(1),
         ).pack(fill="x", pady=2)
         ttk.Button(
             sidebar, text="Sync Google Sheet", style="Quick.TButton",
@@ -935,16 +975,48 @@ class FinanceAutomationApp:
         self.root.clipboard_append("\n".join(ids))
         self._append_log(f"Copied {len(ids)} transaction ID(s) to the clipboard.")
 
-    def _open_google_sheet(self) -> None:
-        sheet_id = self.settings.google_sheet_id or Settings.load().google_sheet_id
+    def _sheet_id_from_field(self, which: int = 1) -> str:
+        raw = self.google_sheet.get() if which == 1 else self.google_sheet_2.get()
+        return normalize_google_sheet_id(raw)
+
+    def _persist_google_sheets(self) -> tuple[str, str]:
+        first = self._sheet_id_from_field(1)
+        second = self._sheet_id_from_field(2)
+        persist_env_values(
+            {
+                "GOOGLE_SHEET_ID": first,
+                "GOOGLE_SHEET_ID_2": second,
+            }
+        )
+        self.google_sheet.set(google_sheet_url(first) or first)
+        self.google_sheet_2.set(google_sheet_url(second) or second)
+        self.settings = Settings.load()
+        return first, second
+
+    def _save_google_sheets(self) -> None:
+        first, second = self._persist_google_sheets()
+        if first and second:
+            self._append_log("Saved Google Sheet 1 and Sheet 2. Send will copy the same rows to both.")
+        elif first:
+            self._append_log("Saved Google Sheet 1. Leave Sheet 2 blank to write only there.")
+        else:
+            messagebox.showwarning(
+                "Google Sheet required",
+                "Paste the Google Sheet URL or ID into Sheet 1.",
+            )
+
+    def _open_google_sheet(self, which: int = 1) -> None:
+        sheet_id = self._sheet_id_from_field(which) or (
+            self.settings.google_sheet_id if which == 1 else self.settings.google_sheet_id_2
+        )
         if not sheet_id:
             messagebox.showinfo(
                 "Google Sheet not set",
-                "Set GOOGLE_SHEET_ID in .env before opening the sheet.",
+                "Paste a Google Sheet URL into Sheet 1 or Sheet 2, then click Save sheets.",
             )
             return
-        webbrowser.open(f"https://docs.google.com/spreadsheets/d/{sheet_id}")
-        self._append_log("Opened the Google Sheet in the browser.")
+        webbrowser.open(google_sheet_url(sheet_id))
+        self._append_log(f"Opened Google Sheet {which} in the browser.")
 
     def _current_settings(self) -> Settings:
         settings = Settings.load()
@@ -960,6 +1032,12 @@ class FinanceAutomationApp:
         settings.filter_date_from = day
         settings.filter_date_to = day
         settings.filter_status = COMPLETED_STATUS
+        first = self._sheet_id_from_field(1)
+        second = self._sheet_id_from_field(2)
+        if first:
+            settings.google_sheet_id = first
+        if second:
+            settings.google_sheet_id_2 = second
         return settings
 
     def _scrape_ready(self, action: str) -> bool:
@@ -1263,6 +1341,7 @@ class FinanceAutomationApp:
             messagebox.showinfo("Busy", "A run is already in progress.")
             return
         day = self.sent_date_filter.get().strip() or local_today()
+        self._persist_google_sheets()
         settings = self._current_settings()
         self.status_text.set("Syncing Google Sheet...")
         self.open_sent_after_send = True
@@ -1302,6 +1381,7 @@ class FinanceAutomationApp:
         )
 
     def _start_sheet_send(self, ids: list[str], label: str) -> None:
+        self._persist_google_sheets()
         settings = self._current_settings()
         self.status_text.set("Sending to Google Sheet...")
         self.open_sent_after_send = True
