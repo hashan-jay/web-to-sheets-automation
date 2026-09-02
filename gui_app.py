@@ -258,6 +258,7 @@ class FinanceAutomationApp:
         self.google_sheet_2 = tk.StringVar(value=google_sheet_url(self.settings.google_sheet_id_2))
         self.dark_mode = tk.BooleanVar(value=load_gui_theme() == "dark")
         self.auto_running = False
+        self._single_run_active = False
         self._auto_after_id: str | None = None
         self._auto_deadline = 0.0
         self.status_text = tk.StringVar(value="Idle")
@@ -703,7 +704,7 @@ class FinanceAutomationApp:
         ttk.Button(sidebar, text="Run now", style="Run.TButton", command=self._run_now).pack(fill="x", pady=3)
         ttk.Label(
             sidebar,
-            text="Run now opens Completed, then clicks page 1 through the last page-link (for example #page-28).",
+            text="Run now reads Completed once, shows remaining needed transactions, then stops. Use Automated Run to keep scraping on a timer.",
             style="Muted.TLabel",
             wraplength=280,
         ).pack(anchor="w", pady=(8, 8))
@@ -1486,6 +1487,7 @@ class FinanceAutomationApp:
             return
         self._persist_login_fields()
         self.poll_interval.set(self._auto_interval_seconds())
+        self._single_run_active = False
         self.auto_running = True
         self.capturing_latest = True
         self.arm_watcher_after_run = False
@@ -1713,10 +1715,18 @@ class FinanceAutomationApp:
         self.latest_run_ids = set()
         self.capturing_latest = True
         self.arm_watcher_after_run = False
+        self._single_run_active = True
+        self.auto_running = False
+        self._cancel_auto_timer()
         self.pages.select(0)
+        self._append_log(
+            "Run now started. Completed will be read once, remaining needed "
+            "transactions will be tracked, then this run will stop."
+        )
         try:
-            self._start_job(scrape=True, write_sheet=False)
+            self._start_job(scrape=True, write_sheet=False, once=True)
         except Exception as exc:
+            self._single_run_active = False
             self.capturing_latest = False
             messagebox.showerror("Run now failed", str(exc))
             self._append_log(f"Run now failed: {exc}")
@@ -1820,7 +1830,13 @@ class FinanceAutomationApp:
                 ids.append(txn_id)
         return ids
 
-    def _start_job(self, scrape: bool, write_sheet: bool = False, quiet: bool = False) -> bool:
+    def _start_job(
+        self,
+        scrape: bool,
+        write_sheet: bool = False,
+        quiet: bool = False,
+        once: bool = False,
+    ) -> bool:
         if self._busy():
             if not quiet:
                 messagebox.showinfo("Busy", "A run is already in progress.")
@@ -1844,6 +1860,7 @@ class FinanceAutomationApp:
                     on_event=self.events.put,
                     scrape=scrape,
                     write_sheet=write_sheet,
+                    once=once,
                 )
             except Exception as exc:
                 self.events.put({"kind": "log", "message": f"Run failed: {exc}"})
@@ -1881,7 +1898,12 @@ class FinanceAutomationApp:
                 self.status_text.set(f"Automated run: next scrape in {seconds}s")
             else:
                 self.status_text.set("Idle")
-        if self.auto_running and self._auto_after_id is None and not self._busy():
+        if (
+            self.auto_running
+            and not self._single_run_active
+            and self._auto_after_id is None
+            and not self._busy()
+        ):
             self._schedule_next_auto()
         self.root.after(120, self._drain_events)
 
@@ -1928,8 +1950,33 @@ class FinanceAutomationApp:
             if self.sheet_id_cache_date:
                 self.sheet_tally_date = self.sheet_id_cache_date
             self._refresh_unsent_latest()
+        if kind == "remaining":
+            remaining = int(event.get("remaining") or 0)
+            scraped = int(event.get("scraped") or 0)
+            records = int(event.get("records") or 0)
+            if remaining:
+                self.match_caption.set(
+                    f"Remaining needed: {remaining}  ·  extracted {scraped}"
+                    + (f" of website Record {records}" if records else "")
+                )
         if kind == "done":
             self._prefer_sent_tab = self.open_sent_after_send
+            if self._single_run_active:
+                self._single_run_active = False
+                self.auto_running = False
+                self._cancel_auto_timer()
+                self.capturing_latest = False
+                self.status_text.set("Idle")
+                try:
+                    self._refresh_counts()
+                    self._reload_workspace()
+                except Exception as exc:
+                    self._append_log(f"Could not refresh workspace: {exc}")
+                try:
+                    self._queue_sheet_unsent_check()
+                except Exception as exc:
+                    self._append_log(f"Unsent check failed: {exc}")
+                return
             if self.auto_running:
                 self.capturing_latest = True
                 self._schedule_next_auto()

@@ -683,6 +683,7 @@ def scrape_transactions(
     settings: Settings,
     limit: int | None = None,
     on_event=None,
+    once: bool = False,
 ) -> ScrapeCapture:
     settings.require_dashboard()
     settings.filter_status = COMPLETED_STATUS
@@ -772,7 +773,10 @@ def scrape_transactions(
                 int(state.get("last") or 0),
                 estimated_pages(int(capture.website_records or 0), per_page),
             )
-            page_limit = max(settings.max_pages, last_page, 80)
+            if once:
+                page_limit = max(last_page, 1)
+            else:
+                page_limit = max(settings.max_pages, last_page, 80)
             _goto_page(page, 1)
             if on_event:
                 on_event(
@@ -781,7 +785,11 @@ def scrape_transactions(
                         "message": (
                             f"Completed list shows Record: {capture.website_records or '?'} "
                             f"· about {per_page} per page · {last_page or '?'} page(s). "
-                            "Reading every page so today's GUI count can match."
+                            + (
+                                "Reading Completed once, then stopping."
+                                if once
+                                else "Reading every page so today's GUI count can match."
+                            )
                         ),
                     }
                 )
@@ -813,6 +821,8 @@ def scrape_transactions(
                 if limit and len(collected) >= limit:
                     break
                 if capture.website_records and len(collected) >= capture.website_records:
+                    break
+                if once and last_page and current_page >= last_page:
                     break
                 advanced = _goto_page(page, page_num + 1) or _goto_next_page(page)
                 if not advanced:

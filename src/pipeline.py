@@ -78,6 +78,7 @@ def gather_from_dashboard(
     db: GatheringDB,
     on_event: EventFn | None = None,
     limit: int | None = None,
+    once: bool = False,
 ) -> PipelineResult:
     result = PipelineResult()
     _emit(on_event, kind="log", message="Gathering transactions from the dashboard...")
@@ -90,7 +91,7 @@ def gather_from_dashboard(
                 "current 6-digit Google Authenticator code into 2FA Passcode and click LOGIN."
             ),
         )
-    capture = scrape_transactions(settings, limit=limit, on_event=on_event)
+    capture = scrape_transactions(settings, limit=limit, on_event=on_event, once=once)
     transactions = capture.transactions
     result.scraped = len(transactions)
     result.website_records = capture.website_records
@@ -142,7 +143,46 @@ def gather_from_dashboard(
             f"{result.new_notifications} new notification(s) queued."
         ),
     )
-    if capture.website_records and result.scraped < capture.website_records:
+    remaining = max(0, int(capture.website_records or 0) - result.scraped)
+    if once:
+        _emit(
+            on_event,
+            kind="remaining",
+            remaining=remaining,
+            scraped=result.scraped,
+            records=capture.website_records,
+            date=capture.filter_date,
+        )
+        if result.scraped == 0:
+            _emit(
+                on_event,
+                kind="log",
+                message=(
+                    f"No Completed transactions were available for {capture.filter_date}. "
+                    "Run now stopped after one pass."
+                ),
+            )
+        elif remaining:
+            _emit(
+                on_event,
+                kind="log",
+                message=(
+                    f"Run now finished after one Completed pass. "
+                    f"Extracted {result.scraped} of website Record {capture.website_records}. "
+                    f"Remaining needed: {remaining}. Automation stopped."
+                ),
+            )
+        else:
+            _emit(
+                on_event,
+                kind="log",
+                message=(
+                    f"Run now finished after one Completed pass. "
+                    f"Extracted {result.scraped} transaction(s). "
+                    "No remaining needed. Automation stopped."
+                ),
+            )
+    elif capture.website_records and result.scraped < capture.website_records:
         _emit(
             on_event,
             kind="log",
@@ -208,6 +248,7 @@ def run_pipeline(
     scrape: bool = True,
     write_sheet: bool = False,
     only_ids: set[str] | None = None,
+    once: bool = False,
 ) -> PipelineResult:
     db = GatheringDB(settings.database_path)
     totals = PipelineResult()
@@ -218,7 +259,7 @@ def run_pipeline(
                 kind="log",
                 message="Reading the admin website already open in Chrome/Brave...",
             )
-        gathered = gather_from_dashboard(settings, db, on_event, limit=limit)
+        gathered = gather_from_dashboard(settings, db, on_event, limit=limit, once=once)
         totals.scraped = gathered.scraped
         totals.new_notifications = gathered.new_notifications
     if write_sheet:
