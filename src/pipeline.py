@@ -5,7 +5,13 @@ from dataclasses import dataclass
 
 from src.config import Settings
 from src.database import GatheringDB, _transaction_from_payload
-from src.mapper import captured_brand, clean_name, to_sheet_row, txn_local_date
+from src.mapper import (
+    captured_brand,
+    clean_name,
+    sheet_game_choices,
+    to_sheet_row,
+    txn_local_date,
+)
 from src.models import Transaction
 from src.scraper import scrape_transactions
 from src.tally import COMPLETED_STATUS
@@ -29,6 +35,22 @@ class PipelineResult:
 def _emit(on_event: EventFn | None, **payload: object) -> None:
     if on_event:
         on_event(payload)
+
+
+def _sheet_label(sheet: SheetClient) -> str:
+    slot = int(getattr(sheet, "slot", 0) or 0)
+    title = sheet.spreadsheet.title
+    return f"Sheet {slot} ({title})" if slot else title
+
+
+def _open_sheet(settings: Settings, slot: int, sheet_id: str) -> SheetClient:
+    sheet = SheetClient(
+        settings.google_credentials_path,
+        sheet_id,
+        settings.google_worksheet,
+    )
+    sheet.slot = slot
+    return sheet
 
 
 def _display_name(txn: Transaction) -> str:
@@ -224,16 +246,28 @@ def copy_pending_to_sheet(
 
     settings.require_sheets()
     groups = _group_by_day(pending, settings.filter_date_from)
-    for sheet_id in settings.sheet_ids():
-        sheet = SheetClient(
-            settings.google_credentials_path,
-            sheet_id,
-            settings.google_worksheet,
-        )
+    targets = settings.sheet_slots()
+    _emit(
+        on_event,
+        kind="log",
+        message="Send will write the same rows to "
+        + ", ".join(f"Sheet {slot}" for slot, _sheet_id in targets)
+        + ".",
+    )
+    for slot, sheet_id in targets:
+        try:
+            sheet = _open_sheet(settings, slot, sheet_id)
+        except Exception as exc:
+            _emit(
+                on_event,
+                kind="log",
+                message=f"Sheet {slot}: could not open this Google Sheet: {exc}",
+            )
+            continue
         _emit(
             on_event,
             kind="log",
-            message=f"Sending to Google Sheet {sheet.spreadsheet.title}.",
+            message=f"{_sheet_label(sheet)}: sending rows.",
         )
         for day, txns in groups.items():
             _write_day_rows(settings, db, sheet, day, txns, result, on_event, action="Copied")
@@ -351,19 +385,44 @@ def sync_date_to_sheet(
         if day in {"", "All dates"}
         else {day: candidates}
     )
-    for sheet_id in settings.sheet_ids():
-        sheet = SheetClient(
-            settings.google_credentials_path,
-            sheet_id,
-            settings.google_worksheet,
-        )
+    targets = settings.sheet_slots()
+    _emit(
+        on_event,
+        kind="log",
+        message="Sync will update "
+        + ", ".join(f"Sheet {slot}" for slot, _sheet_id in targets)
+        + ".",
+    )
+    for slot, sheet_id in targets:
+        try:
+            sheet = _open_sheet(settings, slot, sheet_id)
+        except Exception as exc:
+            _emit(
+                on_event,
+                kind="log",
+                message=f"Sheet {slot}: could not open this Google Sheet: {exc}",
+            )
+            continue
         _emit(
             on_event,
             kind="log",
-            message=f"Syncing to Google Sheet {sheet.spreadsheet.title}.",
+            message=f"{_sheet_label(sheet)}: sync started.",
         )
-        for one_day, txns in groups.items():
-            _sync_one_day(settings, db, sheet, one_day, txns, result, on_event)
+        try:
+            for one_day, txns in groups.items():
+                _sync_one_day(settings, db, sheet, one_day, txns, result, on_event)
+        except Exception as exc:
+            _emit(
+                on_event,
+                kind="log",
+                message=f"{_sheet_label(sheet)}: sync failed: {exc}",
+            )
+            continue
+        _emit(
+            on_event,
+            kind="log",
+            message=f"{_sheet_label(sheet)}: sync finished.",
+        )
     _emit(
         on_event,
         kind="done",
@@ -388,7 +447,7 @@ def _blank_sheet_bank(sheet: SheetClient, on_event: EventFn | None) -> None:
         _emit(
             on_event,
             kind="log",
-            message=f"Could not clear Bank on tab {sheet.tab_title()}: {exc}",
+            message=f"{_sheet_label(sheet)}: could not clear Bank on tab {sheet.tab_title()}: {exc}",
         )
         return
     if cleared:
@@ -396,8 +455,8 @@ def _blank_sheet_bank(sheet: SheetClient, on_event: EventFn | None) -> None:
             on_event,
             kind="log",
             message=(
-                f"Left Bank blank on {cleared} deposit and withdraw row(s) "
-                f"of tab {sheet.tab_title()}."
+                f"{_sheet_label(sheet)}: left Bank blank on {cleared} "
+                f"deposit and withdraw row(s) of tab {sheet.tab_title()}."
             ),
         )
 
@@ -443,31 +502,60 @@ def _write_day_rows(
     _emit(
         on_event,
         kind="log",
-        message=f"Writing {len(to_copy)} row(s) to Google Sheet tab {sheet.tab_title()}.",
+        message=(
+            f"{_sheet_label(sheet)}: writing {len(to_copy)} row(s) "
+            f"to tab {sheet.tab_title()}."
+        ),
     )
-    rows = [to_sheet_row(txn, settings) for txn in to_copy]
+    games = sheet_game_choices(
+        settings,
+        getattr(sheet, "sheet_id", ""),
+        sheet.spreadsheet.title,
+    )
+    if games:
+        _emit(
+            on_event,
+            kind="log",
+            message=(
+                f"{_sheet_label(sheet)}: using GROUP D game dropdown "
+                + ", ".join(games)
+                + "."
+            ),
+        )
+    rows = [to_sheet_row(txn, settings, games=games) for txn in to_copy]
     for txn in to_copy:
         _emit(
             on_event,
             **txn_row_event(
                 txn,
                 "Copying",
-                _row_detail(txn, f"Writing row to Google Sheet tab {sheet.tab_title()}"),
+                _row_detail(txn, f"Writing row to {_sheet_label(sheet)} tab {sheet.tab_title()}"),
             ),
         )
     try:
         sheet.write_rows(rows)
         start = getattr(sheet, "last_write_start", 0)
-        if start:
-            _emit(
-                on_event,
-                kind="log",
-                message=(
-                    f"Wrote {len(to_copy)} row(s) on tab {sheet.tab_title()} "
-                    f"starting at row {start}."
-                ),
-            )
+        skip_day = getattr(sheet, "_skip_day_column", False)
+        _emit(
+            on_event,
+            kind="log",
+            message=(
+                f"{_sheet_label(sheet)}: wrote {len(to_copy)} row(s) "
+                f"on tab {sheet.tab_title()}"
+                + (f" starting at row {start}" if start else "")
+                + (
+                    " in B:L (skipped locked column A and rows 1–104)."
+                    if skip_day
+                    else "."
+                )
+            ),
+        )
     except Exception as exc:
+        _emit(
+            on_event,
+            kind="log",
+            message=f"{_sheet_label(sheet)}: write failed on tab {sheet.tab_title()}: {exc}",
+        )
         for txn in to_copy:
             db.mark(txn.transaction_id, "failed", str(exc))
             result.failed += 1
@@ -497,7 +585,11 @@ def _sync_one_day(
     try:
         sheet.use_day(day)
     except Exception as exc:
-        _emit(on_event, kind="log", message=f"Sync {day} failed: {exc}")
+        _emit(
+            on_event,
+            kind="log",
+            message=f"{_sheet_label(sheet)}: sync {day} failed: {exc}",
+        )
         for txn in txns:
             db.mark(txn.transaction_id, "failed", str(exc))
             result.failed += 1
@@ -518,34 +610,39 @@ def _sync_one_day(
         on_event,
         kind="log",
         message=(
-            f"Sync {day} → tab {sheet.tab_title()}: GUI {len(txns)} txn · "
-            f"Google Sheet {sheet_count} txn · missing {len(missing)}."
+            f"{_sheet_label(sheet)}: sync {day} → tab {sheet.tab_title()}: "
+            f"GUI {len(txns)} txn · this sheet {sheet_count} txn · missing {len(missing)}."
         ),
     )
     if not missing:
         _emit(
             on_event,
             kind="log",
-            message=f"Google Sheet tab {sheet.tab_title()} already has every GUI record for {day}.",
+            message=(
+                f"{_sheet_label(sheet)}: tab {sheet.tab_title()} "
+                f"already has every GUI record for {day}."
+            ),
         )
         _blank_sheet_bank(sheet, on_event)
         return
     before = result.copied
     _write_day_rows(settings, db, sheet, day, missing, result, on_event, action="Restored")
     restored = result.copied - before
+    still_missing = max(0, len(missing) - restored)
     _emit(
         on_event,
         kind="sheet_tally",
         date=day,
         gui_count=len(txns),
         sheet_count=sheet_count + restored,
-        missing=0,
+        missing=still_missing,
     )
     _emit(
         on_event,
         kind="log",
         message=(
-            f"Restored {restored} missing row(s) for {day} on tab {sheet.tab_title()}. "
-            f"Google Sheet now {sheet_count + restored} txn · GUI {len(txns)} txn."
+            f"{_sheet_label(sheet)}: restored {restored} missing row(s) for {day} "
+            f"on tab {sheet.tab_title()}. "
+            f"This sheet now {sheet_count + restored} txn · GUI {len(txns)} txn."
         ),
     )

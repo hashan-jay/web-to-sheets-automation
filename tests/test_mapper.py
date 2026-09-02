@@ -3,6 +3,7 @@ from pathlib import Path
 
 from src.config import Settings
 from src.mapper import (
+    GROUP_D_GAMES,
     SHEET_COL_COMPANY,
     SHEET_COL_COUNT,
     SHEET_COL_PLAYER,
@@ -10,14 +11,17 @@ from src.mapper import (
     clean_name,
     day_from_datetime,
     first_brand_tag,
+    match_sheet_game,
     normalize_brand,
     normalize_status,
     record_local_datetime,
     sheet_amount,
+    sheet_game_choices,
     sheet_status,
     sheet_tab_name,
     to_sheet_row,
     txn_local_date,
+    uses_group_d_games,
 )
 from src.models import Transaction
 
@@ -186,6 +190,39 @@ class MapperTests(unittest.TestCase):
         self.assertEqual(sheet_amount("50", "WITHDRAW"), "-50")
         self.assertEqual(sheet_amount("-50", "WITHDRAWAL"), "-50")
         self.assertEqual(normalize_status("WITHDRAW"), "Withdraw")
+
+    def test_group_d_game_dropdown(self) -> None:
+        self.assertTrue(uses_group_d_games("Copy of GROUP D AUD"))
+        self.assertTrue(uses_group_d_games("GROUP D"))
+        self.assertFalse(uses_group_d_games("GROUP N DUMMY"))
+        self.assertFalse(uses_group_d_games("GROUP U AUD SEPTEMBER 2026"))
+        self.assertEqual(match_sheet_game("FUCKFUCKVIPC"), "FUCKFUCK")
+        self.assertEqual(match_sheet_game("AUSCLUB"), "AUSCLUB")
+        self.assertEqual(match_sheet_game("MM29VIP"), "MM29")
+        self.assertEqual(match_sheet_game("CUNTHAUS88"), "CUNTHAUS")
+        self.assertEqual(match_sheet_game("METH365"), "METH365")
+        self.assertEqual(match_sheet_game("SLOTAUDVIP"), "SLOTAUD")
+        self.assertEqual(match_sheet_game("SLOTROT"), "SLOTROT")
+        self.assertEqual(match_sheet_game("FUCKSPINVIPA"), "")
+        self.assertEqual(match_sheet_game("NETLOSSB"), "")
+        settings = _settings()
+        settings.google_sheet_id_3 = "1ogb4IFxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        self.assertEqual(
+            sheet_game_choices(settings, settings.google_sheet_id_3, "Other title"),
+            GROUP_D_GAMES,
+        )
+        self.assertIsNone(sheet_game_choices(settings, "other-sheet-id-not-used-here", "GROUP N"))
+        row = to_sheet_row(
+            Transaction(transaction_id="9", username="A1", amount="10", brand="FUCKFUCKVIPC"),
+            settings,
+            games=GROUP_D_GAMES,
+        )
+        self.assertEqual(row[SHEET_COL_COMPANY], "FUCKFUCK")
+        unchanged = to_sheet_row(
+            Transaction(transaction_id="9", username="A1", amount="10", brand="FUCKFUCKVIPC"),
+            settings,
+        )
+        self.assertEqual(unchanged[SHEET_COL_COMPANY], "FUCKFUCKVIPC")
 
 
 if __name__ == "__main__":

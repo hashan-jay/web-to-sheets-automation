@@ -1761,8 +1761,11 @@ class FinanceAutomationApp:
         self.status_text.set("Syncing Google Sheet...")
         self.open_sent_after_send = True
         tab = sheet_tab_name(day) or day
+        slots = [f"Sheet {slot}" for slot, _sheet_id in settings.sheet_slots()]
         self._append_log(
-            f"Syncing GUI records for {day} to Google Sheet tab {tab}."
+            f"Syncing GUI records for {day} to tab {tab} on "
+            + (", ".join(slots) if slots else "Sheet 1")
+            + "."
         )
 
         def work() -> None:
@@ -1800,7 +1803,12 @@ class FinanceAutomationApp:
         settings = self._current_settings()
         self.status_text.set("Sending to Google Sheet...")
         self.open_sent_after_send = True
-        self._append_log(f"Sending {len(ids)} {label} to Google Sheets.")
+        slots = [f"Sheet {slot}" for slot, _sheet_id in settings.sheet_slots()]
+        self._append_log(
+            f"Sending {len(ids)} {label} to "
+            + (", ".join(slots) if slots else "Google Sheets")
+            + "."
+        )
 
         def work() -> None:
             try:

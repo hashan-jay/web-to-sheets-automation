@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-from src.config import Settings
+from src.config import Settings, normalize_google_sheet_id
 from src.models import Transaction
 
 TAG_RE = re.compile(r"^\[.*?\]\s*")
@@ -26,6 +26,17 @@ ALLOWED_BRANDS = (
     "HITMATE88",
     "AUZBETS",
     "WEMETH",
+)
+
+# Company Owner dropdown on Copy of GROUP D (Sheet 3).
+GROUP_D_GAMES = (
+    "FUCKFUCK",
+    "AUSCLUB",
+    "MM29",
+    "CUNTHAUS",
+    "METH365",
+    "SLOTAUD",
+    "SLOTROT",
 )
 
 
@@ -144,6 +155,48 @@ def normalize_brand(value: str, settings: Settings | None = None) -> str:
     return captured_brand(value)
 
 
+def uses_group_d_games(spreadsheet_title: str) -> bool:
+    title = " ".join(
+        (spreadsheet_title or "").strip().lower().replace("-", " ").replace("_", " ").split()
+    )
+    return "group d" in title
+
+
+def sheet_game_choices(
+    settings: Settings | None,
+    sheet_id: str = "",
+    spreadsheet_title: str = "",
+) -> tuple[str, ...] | None:
+    if uses_group_d_games(spreadsheet_title):
+        return GROUP_D_GAMES
+    third = ""
+    if settings is not None:
+        third = normalize_google_sheet_id(getattr(settings, "google_sheet_id_3", ""))
+    current = normalize_google_sheet_id(sheet_id)
+    if third and current and third == current:
+        return GROUP_D_GAMES
+    return None
+
+
+def match_sheet_game(brand: str, games: tuple[str, ...] = GROUP_D_GAMES) -> str:
+    """Map a website brand badge onto a GROUP D game dropdown value."""
+    captured = captured_brand(brand)
+    if not captured:
+        return ""
+    upper = captured.upper()
+    ranked = sorted((game.upper() for game in games if game), key=len, reverse=True)
+    for game in ranked:
+        if upper == game:
+            return game
+    for game in ranked:
+        if upper.startswith(game) or game.startswith(upper):
+            return game
+    for game in ranked:
+        if game in upper or upper in game:
+            return game
+    return ""
+
+
 def is_withdraw(status: object) -> bool:
     return str(status or "").strip().upper().startswith("WITHDRAW")
 
@@ -195,7 +248,11 @@ def pad_sheet_row(row: list[str]) -> list[str]:
     return padded[:SHEET_COL_COUNT]
 
 
-def to_sheet_row(txn: Transaction, settings: Settings) -> list[str]:
+def to_sheet_row(
+    txn: Transaction,
+    settings: Settings,
+    games: tuple[str, ...] | None = None,
+) -> list[str]:
     """Write deposit and withdraw onto the same A-L columns.
 
     A DAY | B DATE | C BANK | D DESCRIPTION | E AMOUNT | F STATUS | G ID |
@@ -210,7 +267,10 @@ def to_sheet_row(txn: Transaction, settings: Settings) -> list[str]:
     row[SHEET_COL_AMOUNT] = sheet_amount(txn.amount, txn.status)
     row[SHEET_COL_STATUS] = sheet_status(txn.status)
     row[SHEET_COL_ID] = txn.transaction_id
-    row[SHEET_COL_COMPANY] = normalize_brand(txn.brand, settings)
+    if games:
+        row[SHEET_COL_COMPANY] = match_sheet_game(txn.brand, games)
+    else:
+        row[SHEET_COL_COMPANY] = normalize_brand(txn.brand, settings)
     row[SHEET_COL_COMPANY_TRF] = ""
     row[SHEET_COL_PLAYER] = (txn.username or "").strip()
     row[SHEET_COL_UNUSED] = ""

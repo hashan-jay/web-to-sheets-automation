@@ -85,6 +85,7 @@ class LoginAccountTests(unittest.TestCase):
         self.assertEqual(google_sheet_env_key(1), "GOOGLE_SHEET_ID")
         self.assertEqual(google_sheet_env_key(3), "GOOGLE_SHEET_ID_3")
         self.assertEqual(google_sheet_env_key(5), "GOOGLE_SHEET_ID_5")
+        self.assertEqual(tuple(GOOGLE_SHEET_SLOTS), (1, 2, 3, 4, 5))
 
 
 if __name__ == "__main__":

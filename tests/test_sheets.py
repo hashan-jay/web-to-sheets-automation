@@ -8,10 +8,13 @@ from src.sheets import (
     bank_clear_range,
     day_tab_candidates,
     index_sheet_ids,
+    ledger_write_plan,
     new_rows_only,
     next_append_row,
     office_file_error,
+    protected_range_error,
     uses_ledger_start,
+    uses_locked_day_column,
 )
 
 
@@ -52,10 +55,18 @@ class SheetDedupeTests(unittest.TestCase):
         self.assertIsInstance(mapped, ConfigError)
         self.assertIn("Excel", str(mapped))
         self.assertIsNone(office_file_error(Exception("unrelated")))
+        locked = protected_range_error(
+            Exception("APIError: [400]: You are trying to edit a protected cell or object.")
+        )
+        self.assertIsInstance(locked, ConfigError)
+        self.assertIn("Protect sheets and ranges", str(locked))
+        self.assertIsNone(protected_range_error(Exception("unrelated")))
 
     def test_september_ledger_starts_at_row_105(self) -> None:
         self.assertTrue(uses_ledger_start("GROUP U AUD SEPTEMBER 2026"))
+        self.assertTrue(uses_ledger_start("Copy of GROUP D AUD SEPTEMBER 2026"))
         self.assertFalse(uses_ledger_start("GROUP N DUMMY"))
+        self.assertFalse(uses_ledger_start("GROUP D"))
         self.assertEqual(
             next_append_row(["ID"] + [""] * 110, first_data_row=LEDGER_FIRST_DATA_ROW),
             105,
@@ -65,6 +76,28 @@ class SheetDedupeTests(unittest.TestCase):
         junk_at_bottom = [""] * 103 + ["ID"] + [""] * 50 + ["17110853300"]
         self.assertEqual(next_append_row(junk_at_bottom, first_data_row=105), 105)
         self.assertEqual(next_append_row(["ID", "17110853300"], 1), 3)
+        self.assertTrue(uses_locked_day_column("Copy of GROUP D AUD SEPTEMBER 2026"))
+        self.assertFalse(uses_locked_day_column("GROUP U AUD SEPTEMBER 2026"))
+        self.assertFalse(uses_locked_day_column("GROUP N DUMMY"))
+        range_name, values, start = ledger_write_plan(
+            [["2", "2026-09-02", "ANZ", "Name", "10", "Deposit", "1", "FUCKFUCK", "", "A1", "", ""]],
+            start=20,
+            skip_day_column=True,
+            first_data_row=105,
+        )
+        self.assertEqual(start, 105)
+        self.assertEqual(range_name, "B105:L105")
+        self.assertEqual(values[0][0], "2026-09-02")
+        self.assertEqual(values[0][1], "")
+        self.assertNotIn("2", values[0][:1])
+        dummy_range, dummy_values, dummy_start = ledger_write_plan(
+            [["2", "2026-09-02", "", "Name", "10", "Deposit", "1", "FUCKSPIN", "", "A1", "", ""]],
+            start=2,
+            skip_day_column=False,
+        )
+        self.assertEqual(dummy_start, 2)
+        self.assertEqual(dummy_range, "A2:L2")
+        self.assertEqual(dummy_values[0][0], "2")
 
     def test_bank_clear_range_skips_header(self) -> None:
         start, end = bank_clear_range(["ID", "17110853300", "17110853301"])

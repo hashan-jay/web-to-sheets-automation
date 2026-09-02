@@ -21,6 +21,7 @@ from src.models import Transaction
 from src.tally import (
     COMPLETED_STATUS,
     estimated_pages,
+    pager_finished,
     local_today,
     pager_bounds,
     pager_last_from_hrefs,
@@ -93,6 +94,8 @@ CLICK_PAGER_JS = r"""
   const jq = window.jQuery || window.$;
   if (kind === "page" && value && jq && jq.fn && jq.fn.pagination) {
     try {
+      const pages = jq(root).pagination("getPagesCount");
+      if (pages && value > Number(pages)) return false;
       jq(root).pagination("selectPage", value);
       return true;
     } catch (err) {}
@@ -555,8 +558,11 @@ def _goto_page(page: Page, number: int) -> bool:
     before = _page_ids(page)
     state = _pager_state(page)
     current = int(state.get("current") or 0)
+    last = int(state.get("last") or 0)
     if current == number:
         return True
+    if number < 1 or pager_finished(current, last) or (last and number > last):
+        return False
     clicked = False
     try:
         clicked = bool(page.evaluate(CLICK_PAGER_JS, ["page", number]))
@@ -599,7 +605,7 @@ def _goto_next_page(page: Page) -> bool:
     state = _pager_state(page)
     current = int(state.get("current") or 1)
     last = int(state.get("last") or 0)
-    if last and current >= last:
+    if pager_finished(current, last):
         return False
     clicked = False
     try:
@@ -773,10 +779,12 @@ def scrape_transactions(
                 int(state.get("last") or 0),
                 estimated_pages(int(capture.website_records or 0), per_page),
             )
-            if once:
-                page_limit = max(last_page, 1)
+            if last_page:
+                page_limit = last_page
+            elif once:
+                page_limit = 1
             else:
-                page_limit = max(settings.max_pages, last_page, 80)
+                page_limit = max(settings.max_pages, 80)
             _goto_page(page, 1)
             if on_event:
                 on_event(
@@ -802,8 +810,9 @@ def scrape_transactions(
                         collected[txn.transaction_id] = txn
                 state = _pager_state(page)
                 current_page = int(state.get("current") or page_num)
+                pager_last = int(state.get("last") or 0)
                 last_page = max(
-                    int(state.get("last") or 0),
+                    pager_last,
                     last_page,
                     estimated_pages(int(capture.website_records or 0), per_page),
                 )
@@ -822,9 +831,21 @@ def scrape_transactions(
                     break
                 if capture.website_records and len(collected) >= capture.website_records:
                     break
-                if once and last_page and current_page >= last_page:
+                if pager_finished(current_page, pager_last or last_page):
+                    if on_event:
+                        on_event(
+                            {
+                                "kind": "log",
+                                "message": "Reached the last Completed page. Stopping this scrape.",
+                            }
+                        )
                     break
-                advanced = _goto_page(page, page_num + 1) or _goto_next_page(page)
+                next_page = page_num + 1
+                if pager_last and next_page > pager_last:
+                    break
+                advanced = _goto_page(page, next_page)
+                if not advanced:
+                    advanced = _goto_next_page(page)
                 if not advanced:
                     break
 

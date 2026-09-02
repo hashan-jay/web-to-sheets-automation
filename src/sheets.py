@@ -7,19 +7,51 @@ import gspread
 from gspread.exceptions import APIError
 
 from src.errors import ConfigError
-from src.mapper import SHEET_COL_BANK, date_key, pad_sheet_row, sheet_tab_name
+from src.mapper import (
+    SHEET_COL_BANK,
+    date_key,
+    pad_sheet_row,
+    sheet_tab_name,
+    uses_group_d_games,
+)
 from src.models import Transaction
 
 # GROUP U AUD SEPTEMBER 2026 day tabs have the ledger headings above row 105.
 LEDGER_FIRST_DATA_ROW = 105
-LEDGER_TITLE_MARKERS = ("group u aud september",)
+LEDGER_TITLE_MARKERS = ("group u aud september", "group d aud september")
+
+
+def uses_locked_day_column(spreadsheet_title: str) -> bool:
+    """GROUP D / Sheet 3 locks column A on every date tab."""
+    return uses_group_d_games(spreadsheet_title)
+
+
+def ledger_write_plan(
+    rows: list[list[str]],
+    start: int,
+    skip_day_column: bool,
+    first_data_row: int = 0,
+) -> tuple[str, list[list[str]], int]:
+    """Build a write that stays out of locked heading cells.
+
+    GROUP D: never write column A, and never write above row 105.
+    """
+    values = [pad_sheet_row(row) for row in rows]
+    for row in values:
+        row[SHEET_COL_BANK] = ""
+    if first_data_row:
+        start = max(start, first_data_row)
+    end = start + len(values) - 1
+    if skip_day_column:
+        return f"B{start}:L{end}", [row[1:] for row in values], start
+    return f"A{start}:L{end}", values, start
 
 
 def uses_ledger_start(spreadsheet_title: str) -> bool:
     title = " ".join(
         (spreadsheet_title or "").strip().lower().replace("-", " ").replace("_", " ").split()
     )
-    if "group u" in title and "september" in title:
+    if "september" in title and ("group u" in title or "group d" in title):
         return True
     return any(marker in title for marker in LEDGER_TITLE_MARKERS)
 
@@ -54,8 +86,22 @@ def office_file_error(exc: Exception) -> ConfigError | None:
     )
 
 
+def protected_range_error(exc: Exception) -> ConfigError | None:
+    text = str(exc)
+    if "protected cell" not in text.lower() and "protected sheet" not in text.lower():
+        return None
+    return ConfigError(
+        "Google Sheet tab has protected cells, so the writer cannot add rows. "
+        "Open that spreadsheet as the owner → Data → Protect sheets and ranges. "
+        "On this date tab, either remove protection from the data rows "
+        "(keep the heading/summary rows locked if you want), or add "
+        "sheets-writer@finance-automation-507106.iam.gserviceaccount.com "
+        "as an editor of the protected range. Then Sync again."
+    )
+
+
 def raise_if_office_file(exc: Exception) -> None:
-    mapped = office_file_error(exc)
+    mapped = office_file_error(exc) or protected_range_error(exc)
     if mapped:
         raise mapped from exc
 
@@ -65,9 +111,14 @@ class SheetClient:
         client = gspread.service_account(filename=str(credentials_path))
         try:
             self.spreadsheet = client.open_by_key(sheet_id)
+            self.sheet_id = sheet_id
+            self.slot = 0
             self._ledger_start = (
                 LEDGER_FIRST_DATA_ROW if uses_ledger_start(self.spreadsheet.title) else 0
             )
+            self._skip_day_column = uses_locked_day_column(self.spreadsheet.title)
+            if self._skip_day_column:
+                self._ledger_start = LEDGER_FIRST_DATA_ROW
             self.last_write_start = 0
             self._fallback_title = (worksheet or "").strip()
             if self._fallback_title:
@@ -131,7 +182,9 @@ class SheetClient:
             try:
                 ids = self.ws.col_values(7)
                 start, end = bank_clear_range(ids)
-                if not start:
+                if self._ledger_start:
+                    start = max(start, self._ledger_start)
+                if not start or start > end:
                     return 0
                 blanks = [[""] for _ in range(end - start + 1)]
                 self.ws.update(
@@ -141,6 +194,7 @@ class SheetClient:
                 )
                 return sum(1 for item in ids if str(item).strip().isdigit())
             except APIError as exc:
+                raise_if_office_file(exc)
                 last_error = exc
                 if "429" not in str(exc) or attempt == 3:
                     raise
@@ -153,19 +207,19 @@ class SheetClient:
     def write_rows(self, rows: list[list[str]]) -> int:
         if not rows:
             return 0
-        values = [pad_sheet_row(row) for row in rows]
-        for row in values:
-            row[SHEET_COL_BANK] = ""
         last_error: Exception | None = None
         for attempt in range(4):
             try:
                 start = self.next_empty_row()
-                if self._ledger_start or uses_ledger_start(self.spreadsheet.title):
-                    start = max(start, LEDGER_FIRST_DATA_ROW)
-                end = start + len(values) - 1
+                range_name, values, start = ledger_write_plan(
+                    rows,
+                    start,
+                    skip_day_column=self._skip_day_column,
+                    first_data_row=self._ledger_start,
+                )
                 self.last_write_start = start
                 self.ws.update(
-                    range_name=f"A{start}:L{end}",
+                    range_name=range_name,
                     values=values,
                     value_input_option="USER_ENTERED",
                 )

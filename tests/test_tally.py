@@ -6,6 +6,7 @@ from src.tally import (
     parse_amount,
     estimated_pages,
     pager_bounds,
+    pager_finished,
     pager_last_from_hrefs,
     parse_website_summary,
     tally_rows,
@@ -51,6 +52,10 @@ class TallyTests(unittest.TestCase):
     def test_simple_pagination_hrefs(self) -> None:
         last = pager_last_from_hrefs(["#page-2", "#page-28"], current=1)
         self.assertEqual(last, 28)
+        self.assertTrue(pager_finished(28, 28))
+        self.assertTrue(pager_finished(33, 28))
+        self.assertFalse(pager_finished(27, 28))
+        self.assertFalse(pager_finished(1, 0))
 
 
 if __name__ == "__main__":

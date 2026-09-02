@@ -38,6 +38,11 @@ def pager_bounds(labels: list[str], current: int = 0) -> tuple[int, int]:
     return now, last
 
 
+def pager_finished(current: int, last: int) -> bool:
+    """True when the Completed pager is already on its last page."""
+    return bool(last) and int(current or 0) >= int(last)
+
+
 def parse_website_summary(text: str) -> dict[str, int | str]:
     record = RECORD_RE.search(text or "")
     total = TOTAL_RE.search(text or "")

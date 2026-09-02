@@ -284,13 +284,18 @@ class Settings:
             return
         setattr(self, f"google_sheet_id_{int(slot)}", key)
 
-    def sheet_ids(self) -> list[str]:
-        ids: list[str] = []
+    def sheet_slots(self) -> list[tuple[int, str]]:
+        seen: set[str] = set()
+        slots: list[tuple[int, str]] = []
         for slot in GOOGLE_SHEET_SLOTS:
             key = normalize_google_sheet_id(self.sheet_id_at(slot))
-            if key and key not in ids:
-                ids.append(key)
-        return ids
+            if key and key not in seen:
+                seen.add(key)
+                slots.append((slot, key))
+        return slots
+
+    def sheet_ids(self) -> list[str]:
+        return [sheet_id for _slot, sheet_id in self.sheet_slots()]
 
     @classmethod
     def load(cls) -> Settings:
