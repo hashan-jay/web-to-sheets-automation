@@ -340,6 +340,27 @@ def _group_by_day(transactions: list[Transaction], fallback: str) -> dict[str, l
     return groups
 
 
+def _blank_sheet_bank(sheet: SheetClient, on_event: EventFn | None) -> None:
+    try:
+        cleared = sheet.clear_bank_names()
+    except Exception as exc:
+        _emit(
+            on_event,
+            kind="log",
+            message=f"Could not clear Bank on tab {sheet.tab_title()}: {exc}",
+        )
+        return
+    if cleared:
+        _emit(
+            on_event,
+            kind="log",
+            message=(
+                f"Left Bank blank on {cleared} deposit and withdraw row(s) "
+                f"of tab {sheet.tab_title()}."
+            ),
+        )
+
+
 def _write_day_rows(
     settings: Settings,
     db: GatheringDB,
@@ -376,6 +397,7 @@ def _write_day_rows(
             detail=f"Already on Google Sheet tab {sheet.tab_title()}",
         )
     if not to_copy:
+        _blank_sheet_bank(sheet, on_event)
         return
     _emit(
         on_event,
@@ -419,6 +441,7 @@ def _write_day_rows(
         db.mark(txn.transaction_id, "copied", detail)
         result.copied += 1
         _emit(on_event, **txn_row_event(txn, "Copied", _row_detail(txn, detail)))
+    _blank_sheet_bank(sheet, on_event)
 
 
 def _sync_one_day(
@@ -464,6 +487,7 @@ def _sync_one_day(
             kind="log",
             message=f"Google Sheet tab {sheet.tab_title()} already has every GUI record for {day}.",
         )
+        _blank_sheet_bank(sheet, on_event)
         return
     before = result.copied
     _write_day_rows(settings, db, sheet, day, missing, result, on_event, action="Restored")

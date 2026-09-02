@@ -7,7 +7,7 @@ import gspread
 from gspread.exceptions import APIError
 
 from src.errors import ConfigError
-from src.mapper import date_key, pad_sheet_row, sheet_tab_name
+from src.mapper import SHEET_COL_BANK, date_key, pad_sheet_row, sheet_tab_name
 from src.models import Transaction
 
 # GROUP U AUD SEPTEMBER 2026 day tabs have the ledger headings above row 105.
@@ -154,6 +154,8 @@ class SheetClient:
         if not rows:
             return 0
         values = [pad_sheet_row(row) for row in rows]
+        for row in values:
+            row[SHEET_COL_BANK] = ""
         last_error: Exception | None = None
         for attempt in range(4):
             try:

@@ -167,6 +167,7 @@ from src.config import (
     Settings,
     active_login_slot,
     google_sheet_url,
+    clear_login_account,
     load_login_accounts,
     normalize_dashboard_url,
     normalize_google_sheet_id,
@@ -665,16 +666,24 @@ class FinanceAutomationApp:
         self.account_use_btns = []
         for slot in (1, 2, 3):
             row = ttk.Frame(accounts_box, style="LoginBox.TFrame")
-            row.pack(fill="x", pady=2)
+            row.pack(fill="x", pady=(0, 8))
             use_btn = ttk.Button(
                 row,
                 style="Cred.TButton",
                 command=lambda number=slot: self._select_account(number),
             )
-            use_btn.pack(side="left", fill="x", expand=True, padx=(0, 6))
+            use_btn.pack(fill="x")
             self.account_use_btns.append(use_btn)
+            actions = ttk.Frame(row, style="LoginBox.TFrame")
+            actions.pack(fill="x", pady=(4, 0))
             ttk.Button(
-                row,
+                actions,
+                text="Clear",
+                style="Quick.TButton",
+                command=lambda number=slot: self._clear_account(number),
+            ).pack(side="left")
+            ttk.Button(
+                actions,
                 text="Save",
                 style="Quick.TButton",
                 command=lambda number=slot: self._save_account(number),
@@ -1244,6 +1253,28 @@ class FinanceAutomationApp:
         self._append_log(
             f"Saved current login fields to Account {slot} ({username} on {self._account_host(website)})."
         )
+
+    def _clear_account(self, slot: int) -> None:
+        account = self.login_accounts[slot - 1]
+        if not account["username"] and not account["password"] and not account.get("website"):
+            messagebox.showinfo(f"Account {slot}", "This saved account is already empty.")
+            return
+        if not messagebox.askyesno(
+            f"Clear Account {slot}",
+            f"Remove the saved website, username, password, and 2FA from Account {slot} only?",
+        ):
+            return
+        self.login_accounts[slot - 1] = clear_login_account(slot)
+        if self.active_account.get() == slot:
+            self.login_website.set("")
+            self.login_username.set("")
+            self.login_password.set("")
+            self.login_2fa.set("")
+            self.saved_username = ""
+            self.saved_password = ""
+            self.saved_2fa = ""
+        self._refresh_account_buttons()
+        self._append_log(f"Cleared saved Account {slot}. The other accounts were left as they are.")
 
     def _persist_login_fields(self) -> None:
         website, username, password, twofa = self._account_fields()

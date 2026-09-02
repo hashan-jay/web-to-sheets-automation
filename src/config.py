@@ -155,6 +155,39 @@ def persist_login_account(
     )
 
 
+def empty_login_account(slot: int) -> dict[str, str]:
+    return {
+        "slot": str(login_slot(slot)),
+        "website": "",
+        "username": "",
+        "password": "",
+        "twofa": "",
+    }
+
+
+def login_account_clear_updates(slot: int) -> dict[str, str]:
+    number = login_slot(slot)
+    updates = {key: "" for key in login_account_keys(number).values()}
+    if number == 1:
+        updates.update(
+            {
+                "DASHBOARD_URL": "",
+                "DASHBOARD_USERNAME": "",
+                "DASHBOARD_PASSWORD": "",
+                "DASHBOARD_2FA": "",
+            }
+        )
+    return updates
+
+
+def clear_login_account(slot: int) -> dict[str, str]:
+    number = login_slot(slot)
+    updates = login_account_clear_updates(number)
+    persist_env_values(updates)
+    os.environ.update(updates)
+    return empty_login_account(number)
+
+
 def _load_env() -> None:
     load_dotenv(ROOT / ".env")
     bundled = ROOT / "ms-playwright"

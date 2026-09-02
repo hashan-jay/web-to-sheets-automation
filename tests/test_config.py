@@ -2,8 +2,10 @@ import unittest
 
 from src.config import (
     LOGIN_ACCOUNT_SLOTS,
+    empty_login_account,
     google_sheet_url,
     load_gui_theme,
+    login_account_clear_updates,
     login_account_keys,
     login_slot,
     normalize_dashboard_url,
@@ -25,6 +27,26 @@ class LoginAccountTests(unittest.TestCase):
         self.assertEqual(keys["username"], "LOGIN_2_USERNAME")
         self.assertEqual(keys["password"], "LOGIN_2_PASSWORD")
         self.assertEqual(keys["twofa"], "LOGIN_2_2FA")
+
+    def test_clear_one_saved_account(self) -> None:
+        empty = empty_login_account(2)
+        self.assertEqual(empty["slot"], "2")
+        self.assertEqual(empty["website"], "")
+        self.assertEqual(empty["username"], "")
+        self.assertEqual(empty["password"], "")
+        self.assertEqual(empty["twofa"], "")
+        slot_two = login_account_clear_updates(2)
+        self.assertEqual(slot_two["LOGIN_2_URL"], "")
+        self.assertEqual(slot_two["LOGIN_2_USERNAME"], "")
+        self.assertEqual(slot_two["LOGIN_2_PASSWORD"], "")
+        self.assertEqual(slot_two["LOGIN_2_2FA"], "")
+        self.assertNotIn("LOGIN_1_USERNAME", slot_two)
+        self.assertNotIn("LOGIN_3_PASSWORD", slot_two)
+        self.assertNotIn("DASHBOARD_USERNAME", slot_two)
+        slot_one = login_account_clear_updates(1)
+        self.assertEqual(slot_one["LOGIN_1_USERNAME"], "")
+        self.assertEqual(slot_one["DASHBOARD_USERNAME"], "")
+        self.assertNotIn("LOGIN_2_USERNAME", slot_one)
 
     def test_normalize_dashboard_url(self) -> None:
         self.assertEqual(
