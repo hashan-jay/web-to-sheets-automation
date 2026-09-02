@@ -3,6 +3,7 @@ import unittest
 from src.config import (
     LOGIN_ACCOUNT_SLOTS,
     google_sheet_url,
+    load_gui_theme,
     login_account_keys,
     login_slot,
     normalize_dashboard_url,
@@ -48,6 +49,7 @@ class LoginAccountTests(unittest.TestCase):
             "1BAXqHMZAP9-sVXGn_up32CkmOmwLiPAxDnYf3yqZiRo",
         )
         self.assertEqual(normalize_google_sheet_id(""), "")
+        self.assertIn(load_gui_theme(), {"light", "dark"})
         self.assertTrue(
             google_sheet_url("1BAXqHMZAP9-sVXGn_up32CkmOmwLiPAxDnYf3yqZiRo").endswith(
                 "/1BAXqHMZAP9-sVXGn_up32CkmOmwLiPAxDnYf3yqZiRo"

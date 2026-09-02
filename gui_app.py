@@ -68,7 +68,7 @@ COLUMN_HEADINGS = {
     "status": ("Sheet", 80),
     "detail": ("Detail", 220),
 }
-TREE_TAGS = (
+TREE_TAGS_LIGHT = (
     ("Copied", "#15803d"),
     ("Preview", "#1d4ed8"),
     ("Gathered", "#0f766e"),
@@ -77,6 +77,82 @@ TREE_TAGS = (
     ("Failed", "#b91c1c"),
     ("Skipped", "#6b7280"),
 )
+TREE_TAGS_DARK = (
+    ("Copied", "#34d399"),
+    ("Preview", "#67e8f9"),
+    ("Gathered", "#22d3ee"),
+    ("Pending", "#22d3ee"),
+    ("Copying", "#fbbf24"),
+    ("Failed", "#fb7185"),
+    ("Skipped", "#71717a"),
+)
+TREE_TAGS = TREE_TAGS_LIGHT
+THEMES = {
+    "light": {
+        "root": "#eef2f7",
+        "card": "#ffffff",
+        "header": "#0f2744",
+        "header_fg": "#ffffff",
+        "header_sub": "#c5d4e8",
+        "title": "#0f2744",
+        "muted": "#5b6b7c",
+        "tally_bg": "#f4f7fb",
+        "tally_fg": "#0f2744",
+        "input_bg": "#ffffff",
+        "input_fg": "#0f172a",
+        "button_bg": "#e2e8f0",
+        "button_fg": "#0f172a",
+        "run_bg": "#0f766e",
+        "run_fg": "#f0fdfa",
+        "tree_bg": "#ffffff",
+        "tree_fg": "#0f172a",
+        "tree_head_bg": "#e2e8f0",
+        "tree_head_fg": "#0f2744",
+        "tree_select": "#bfdbfe",
+        "log_bg": "#0f2744",
+        "log_fg": "#e6eef8",
+        "tab": "#dbe4ee",
+        "tab_sel": "#ffffff",
+        "tab_fg": "#334155",
+        "tab_sel_fg": "#0f2744",
+        "switch_on": "#38bdf8",
+        "switch_off": "#94a3b8",
+        "border": "#d4dbe6",
+        "accent": "#0891b2",
+    },
+    "dark": {
+        "root": "#050505",
+        "card": "#0c0c0c",
+        "header": "#050505",
+        "header_fg": "#f4f4f5",
+        "header_sub": "#a1a1aa",
+        "title": "#f4f4f5",
+        "muted": "#a1a1aa",
+        "tally_bg": "#141414",
+        "tally_fg": "#f4f4f5",
+        "input_bg": "#141414",
+        "input_fg": "#f4f4f5",
+        "button_bg": "#141414",
+        "button_fg": "#f4f4f5",
+        "run_bg": "#0891b2",
+        "run_fg": "#ffffff",
+        "tree_bg": "#0c0c0c",
+        "tree_fg": "#f4f4f5",
+        "tree_head_bg": "#141414",
+        "tree_head_fg": "#a1a1aa",
+        "tree_select": "#164e63",
+        "log_bg": "#0c0c0c",
+        "log_fg": "#a1a1aa",
+        "tab": "#141414",
+        "tab_sel": "#0c0c0c",
+        "tab_fg": "#a1a1aa",
+        "tab_sel_fg": "#67e8f9",
+        "switch_on": "#67e8f9",
+        "switch_off": "#3f3f46",
+        "border": "#262626",
+        "accent": "#67e8f9",
+    },
+}
 STATUS_RANK = {
     "Failed": 1,
     "Gathered": 2,
@@ -95,8 +171,10 @@ from src.config import (
     normalize_dashboard_url,
     normalize_google_sheet_id,
     persist_env_values,
+    persist_gui_theme,
     persist_login_account,
     service_account_email,
+    load_gui_theme,
 )
 from src.database import GatheringDB, _transaction_from_payload
 from src.mapper import record_local_datetime, sheet_tab_name
@@ -177,6 +255,7 @@ class FinanceAutomationApp:
         self.auto_interval = tk.IntVar(value=int(self.settings.poll_interval_seconds or 60))
         self.google_sheet = tk.StringVar(value=google_sheet_url(self.settings.google_sheet_id))
         self.google_sheet_2 = tk.StringVar(value=google_sheet_url(self.settings.google_sheet_id_2))
+        self.dark_mode = tk.BooleanVar(value=load_gui_theme() == "dark")
         self.auto_running = False
         self._auto_after_id: str | None = None
         self._auto_deadline = 0.0
@@ -197,6 +276,7 @@ class FinanceAutomationApp:
 
         self._build_style()
         self._build_layout()
+        self._apply_theme()
         self._refresh_counts()
         self._load_recent_rows()
         self._append_log("GUI ready. Open a section on the right. Run now only scrapes.")
@@ -209,39 +289,325 @@ class FinanceAutomationApp:
         self.root.after(120, self._drain_events)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
+    def _theme_name(self) -> str:
+        return "dark" if self.dark_mode.get() else "light"
+
+    def _colors(self) -> dict[str, str]:
+        return THEMES[self._theme_name()]
+
     def _build_style(self) -> None:
-        self.root.configure(bg="#eef2f7")
         style = ttk.Style(self.root)
         if "clam" in style.theme_names():
             style.theme_use("clam")
-        style.configure("Root.TFrame", background="#eef2f7")
-        style.configure("Card.TFrame", background="#ffffff", relief="flat")
-        style.configure("Header.TFrame", background="#0f2744")
-        style.configure("Header.TLabel", background="#0f2744", foreground="#ffffff", font=("Segoe UI", 16, "bold"))
-        style.configure("HeaderSub.TLabel", background="#0f2744", foreground="#c5d4e8", font=("Segoe UI", 10))
-        style.configure("CardTitle.TLabel", background="#ffffff", foreground="#0f2744", font=("Segoe UI", 11, "bold"))
-        style.configure("Muted.TLabel", background="#ffffff", foreground="#5b6b7c", font=("Segoe UI", 9))
-        style.configure("Stat.TLabel", background="#ffffff", foreground="#0f2744", font=("Segoe UI", 20, "bold"))
-        style.configure("Tally.TLabel", background="#f4f7fb", foreground="#0f2744", font=("Segoe UI", 10, "bold"))
-        style.configure("TallyBox.TFrame", background="#f4f7fb")
-        style.configure("Run.TButton", font=("Segoe UI", 10, "bold"), padding=8)
-        style.configure("Quick.TButton", font=("Segoe UI", 9), padding=5)
-        style.configure("Cred.TButton", font=("Consolas", 9), padding=5, background="#f4f7fb")
-        style.configure("LoginBox.TFrame", background="#f4f7fb")
-        style.configure("TNotebook", background="#eef2f7", borderwidth=0)
-        style.configure("TNotebook.Tab", font=("Segoe UI", 10, "bold"), padding=(18, 10))
-        style.configure("Treeview", font=("Segoe UI", 9), rowheight=26)
-        style.configure("Treeview.Heading", font=("Segoe UI", 9, "bold"))
+        self._apply_theme_styles()
+
+    def _flat(self, style: ttk.Style, name: str, fill: str, border: str, **extra) -> None:
+        style.configure(
+            name,
+            background=fill,
+            bordercolor=border,
+            lightcolor=border,
+            darkcolor=border,
+            relief="flat",
+            **extra,
+        )
+
+    def _apply_theme_styles(self) -> None:
+        colors = self._colors()
+        border = colors["border"]
+        self.root.configure(bg=colors["root"])
+        style = ttk.Style(self.root)
+        self._flat(style, "Root.TFrame", colors["root"], colors["root"], borderwidth=0)
+        self._flat(style, "Card.TFrame", colors["card"], colors["card"], borderwidth=0)
+        self._flat(style, "Header.TFrame", colors["header"], colors["header"], borderwidth=0)
+        style.configure(
+            "Header.TLabel",
+            background=colors["header"],
+            foreground=colors["header_fg"],
+            font=("Segoe UI", 16, "bold"),
+        )
+        style.configure(
+            "HeaderSub.TLabel",
+            background=colors["header"],
+            foreground=colors["header_sub"],
+            font=("Segoe UI", 10),
+        )
+        style.configure(
+            "CardTitle.TLabel",
+            background=colors["card"],
+            foreground=colors["title"],
+            font=("Segoe UI", 11, "bold"),
+        )
+        style.configure(
+            "Muted.TLabel",
+            background=colors["card"],
+            foreground=colors["muted"],
+            font=("Segoe UI", 9),
+        )
+        style.configure(
+            "Stat.TLabel",
+            background=colors["card"],
+            foreground=colors["title"],
+            font=("Segoe UI", 20, "bold"),
+        )
+        style.configure(
+            "Tally.TLabel",
+            background=colors["tally_bg"],
+            foreground=colors["tally_fg"],
+            font=("Segoe UI", 10, "bold"),
+        )
+        self._flat(style, "TallyBox.TFrame", colors["tally_bg"], colors["tally_bg"], borderwidth=0)
+        self._flat(style, "LoginBox.TFrame", colors["tally_bg"], colors["tally_bg"], borderwidth=0)
+        self._flat(
+            style,
+            "TButton",
+            colors["button_bg"],
+            border,
+            foreground=colors["button_fg"],
+            font=("Segoe UI", 9),
+            padding=6,
+            borderwidth=1,
+        )
+        style.map(
+            "TButton",
+            background=[("active", colors["tally_bg"]), ("pressed", colors["tally_bg"])],
+            foreground=[("active", colors["button_fg"])],
+            bordercolor=[("active", colors["accent"]), ("pressed", colors["accent"])],
+            lightcolor=[("active", colors["accent"]), ("pressed", colors["accent"])],
+            darkcolor=[("active", colors["accent"]), ("pressed", colors["accent"])],
+        )
+        self._flat(
+            style,
+            "Run.TButton",
+            colors["run_bg"],
+            colors["run_bg"],
+            foreground=colors["run_fg"],
+            font=("Segoe UI", 10, "bold"),
+            padding=8,
+            borderwidth=0,
+        )
+        style.map(
+            "Run.TButton",
+            background=[("active", colors["accent"]), ("pressed", colors["run_bg"])],
+            foreground=[("active", colors["run_fg"])],
+            bordercolor=[("active", colors["accent"])],
+            lightcolor=[("active", colors["accent"])],
+            darkcolor=[("active", colors["accent"])],
+        )
+        self._flat(
+            style,
+            "Quick.TButton",
+            colors["button_bg"],
+            border,
+            foreground=colors["button_fg"],
+            font=("Segoe UI", 9),
+            padding=6,
+            borderwidth=1,
+        )
+        self._flat(
+            style,
+            "Cred.TButton",
+            colors["tally_bg"],
+            border,
+            foreground=colors["button_fg"],
+            font=("Consolas", 9),
+            padding=5,
+            borderwidth=1,
+        )
+        style.configure(
+            "TCheckbutton",
+            background=colors["card"],
+            foreground=colors["title"],
+            font=("Segoe UI", 9),
+        )
+        style.map("TCheckbutton", background=[("active", colors["card"])], foreground=[("active", colors["title"])])
+        style.configure(
+            "TEntry",
+            fieldbackground=colors["input_bg"],
+            foreground=colors["input_fg"],
+            insertcolor=colors["input_fg"],
+            background=colors["input_bg"],
+            bordercolor=border,
+            lightcolor=border,
+            darkcolor=border,
+        )
+        style.configure(
+            "TSpinbox",
+            fieldbackground=colors["input_bg"],
+            foreground=colors["input_fg"],
+            insertcolor=colors["input_fg"],
+            background=colors["card"],
+            arrowcolor=colors["title"],
+            bordercolor=border,
+            lightcolor=border,
+            darkcolor=border,
+        )
+        style.configure(
+            "TCombobox",
+            fieldbackground=colors["input_bg"],
+            foreground=colors["input_fg"],
+            background=colors["card"],
+            arrowcolor=colors["title"],
+            bordercolor=border,
+            lightcolor=border,
+            darkcolor=border,
+        )
+        style.map(
+            "TCombobox",
+            fieldbackground=[("readonly", colors["input_bg"])],
+            foreground=[("readonly", colors["input_fg"])],
+            bordercolor=[("focus", colors["accent"])],
+        )
+        self._flat(style, "TNotebook", colors["root"], colors["root"], borderwidth=0)
+        style.configure(
+            "TNotebook.Tab",
+            font=("Segoe UI", 10, "bold"),
+            padding=(16, 9),
+            background=colors["tab"],
+            foreground=colors["tab_fg"],
+            bordercolor=border,
+            lightcolor=border,
+            darkcolor=border,
+        )
+        style.map(
+            "TNotebook.Tab",
+            background=[("selected", colors["tab_sel"])],
+            foreground=[("selected", colors["tab_sel_fg"])],
+            bordercolor=[("selected", colors["accent"])],
+        )
+        style.configure(
+            "Treeview",
+            font=("Segoe UI", 9),
+            rowheight=28,
+            background=colors["tree_bg"],
+            fieldbackground=colors["tree_bg"],
+            foreground=colors["tree_fg"],
+            bordercolor=border,
+            lightcolor=border,
+            darkcolor=border,
+        )
+        style.configure(
+            "Treeview.Heading",
+            font=("Segoe UI", 9, "bold"),
+            background=colors["tree_head_bg"],
+            foreground=colors["tree_head_fg"],
+            bordercolor=border,
+            lightcolor=border,
+            darkcolor=border,
+        )
+        style.map(
+            "Treeview",
+            background=[("selected", colors["tree_select"])],
+            foreground=[("selected", colors["header_fg"])],
+        )
+        style.map(
+            "Treeview.Heading",
+            background=[("active", colors["tree_head_bg"])],
+            foreground=[("active", colors["tree_head_fg"])],
+        )
+        style.configure(
+            "TScrollbar",
+            background=colors["tally_bg"],
+            troughcolor=colors["root"],
+            arrowcolor=colors["muted"],
+            bordercolor=colors["root"],
+            lightcolor=colors["tally_bg"],
+            darkcolor=colors["tally_bg"],
+        )
+        self.root.option_add("*TCombobox*Listbox.background", colors["input_bg"])
+        self.root.option_add("*TCombobox*Listbox.foreground", colors["input_fg"])
+        self.root.option_add("*TCombobox*Listbox.selectBackground", colors["tree_select"])
+
+    def _apply_theme(self) -> None:
+        self._apply_theme_styles()
+        colors = self._colors()
+        if hasattr(self, "side_canvas"):
+            self.side_canvas.configure(bg=colors["card"])
+        if hasattr(self, "log"):
+            self.log.configure(
+                bg=colors["log_bg"],
+                fg=colors["log_fg"],
+                insertbackground=colors["accent"],
+                highlightthickness=0,
+                bd=0,
+                relief="flat",
+            )
+        tags = TREE_TAGS_DARK if self.dark_mode.get() else TREE_TAGS_LIGHT
+        for name in ("latest_tree", "deposits_tree", "withdrawals_tree", "sent_tree"):
+            tree = getattr(self, name, None)
+            if tree is None:
+                continue
+            for tag, color in tags:
+                tree.tag_configure(tag, foreground=color)
+        self._draw_theme_switch()
+
+    def _toggle_theme(self, _event=None) -> None:
+        self.dark_mode.set(not self.dark_mode.get())
+        persist_gui_theme(self._theme_name())
+        self._apply_theme()
+        self._append_log(f"Theme set to {self._theme_name()} mode.")
+
+    def _draw_theme_switch(self) -> None:
+        if not hasattr(self, "theme_switch"):
+            return
+        colors = self._colors()
+        canvas = self.theme_switch
+        canvas.configure(bg=colors["header"])
+        canvas.delete("all")
+        on = self.dark_mode.get()
+        fill = colors["switch_on"] if on else colors["switch_off"]
+        canvas.create_oval(2, 3, 20, 21, fill=fill, outline=fill)
+        canvas.create_oval(26, 3, 44, 21, fill=fill, outline=fill)
+        canvas.create_rectangle(11, 3, 35, 21, fill=fill, outline=fill)
+        knob_x = 28 if on else 4
+        canvas.create_oval(knob_x, 5, knob_x + 14, 19, fill="#ffffff", outline="#ffffff")
+        if hasattr(self, "theme_switch_label"):
+            self.theme_switch_label.configure(
+                text="Dark" if on else "Light",
+                background=colors["header"],
+                foreground=colors["header_sub"],
+            )
+        if hasattr(self, "theme_switch_wrap"):
+            self.theme_switch_wrap.configure(background=colors["header"])
+
+    def _build_theme_switch(self, parent: ttk.Frame) -> None:
+        colors = self._colors()
+        wrap = tk.Frame(parent, bg=colors["header"])
+        wrap.pack(side="right", padx=(12, 0))
+        self.theme_switch_wrap = wrap
+        self.theme_switch_label = tk.Label(
+            wrap,
+            text="Dark" if self.dark_mode.get() else "Light",
+            bg=colors["header"],
+            fg=colors["header_sub"],
+            font=("Segoe UI", 9, "bold"),
+        )
+        self.theme_switch_label.pack(side="left", padx=(0, 8))
+        self.theme_switch = tk.Canvas(
+            wrap,
+            width=48,
+            height=24,
+            highlightthickness=0,
+            bg=colors["header"],
+            cursor="hand2",
+        )
+        self.theme_switch.pack(side="left")
+        self.theme_switch.bind("<Button-1>", self._toggle_theme)
+        self.theme_switch_label.bind("<Button-1>", self._toggle_theme)
+        self._draw_theme_switch()
 
     def _build_layout(self) -> None:
         header = ttk.Frame(self.root, style="Header.TFrame", padding=(20, 14))
         header.pack(fill="x")
-        ttk.Label(header, text="Finance Automation", style="Header.TLabel").pack(anchor="w")
+        titles = ttk.Frame(header, style="Header.TFrame")
+        titles.pack(side="left", fill="x", expand=True)
+        ttk.Label(titles, text="Finance Automation", style="Header.TLabel").pack(anchor="w")
         ttk.Label(
-            header,
+            titles,
             text="Scrapes Completed only. Pick a date so the GUI count matches the website Record count, then send once — no duplicate sheet rows.",
             style="HeaderSub.TLabel",
         ).pack(anchor="w", pady=(4, 0))
+        self._build_theme_switch(header)
 
         body = ttk.Frame(self.root, style="Root.TFrame", padding=16)
         body.pack(fill="both", expand=True)
@@ -254,7 +620,8 @@ class FinanceAutomationApp:
     def _build_sidebar(self, body: ttk.Frame) -> None:
         side_wrap = ttk.Frame(body, style="Card.TFrame")
         side_wrap.grid(row=0, column=0, sticky="nsw", padx=(0, 12))
-        side_canvas = tk.Canvas(side_wrap, bg="#ffffff", highlightthickness=0, width=310, height=780)
+        side_canvas = tk.Canvas(side_wrap, bg=self._colors()["card"], highlightthickness=0, width=310, height=780)
+        self.side_canvas = side_canvas
         side_scroll = ttk.Scrollbar(side_wrap, orient="vertical", command=side_canvas.yview)
         sidebar = ttk.Frame(side_canvas, style="Card.TFrame", padding=16)
         sidebar.bind(
@@ -558,10 +925,12 @@ class FinanceAutomationApp:
             height=7,
             wrap="word",
             font=("Consolas", 9),
-            bg="#0f2744",
-            fg="#e6eef8",
-            insertbackground="#e6eef8",
+            bg=self._colors()["log_bg"],
+            fg=self._colors()["log_fg"],
+            insertbackground=self._colors()["accent"],
             relief="flat",
+            highlightthickness=0,
+            bd=0,
             padx=8,
             pady=8,
         )

@@ -4,13 +4,14 @@ from src.mapper import SHEET_COL_COUNT, pad_sheet_row
 from src.models import Transaction
 from src.errors import ConfigError
 from src.sheets import (
+    LEDGER_FIRST_DATA_ROW,
     bank_clear_range,
     day_tab_candidates,
-    find_header_row,
     index_sheet_ids,
     new_rows_only,
     next_append_row,
     office_file_error,
+    uses_ledger_start,
 )
 
 
@@ -52,16 +53,16 @@ class SheetDedupeTests(unittest.TestCase):
         self.assertIn("Excel", str(mapped))
         self.assertIsNone(office_file_error(Exception("unrelated")))
 
-    def test_writes_below_template_headings(self) -> None:
-        days = ["RIOSK DWP", "DAY", "2", "2", "2"]
-        dates = ["", "DATE", "", "", ""]
-        ids = ["", "ID", "", "", ""]
-        header = find_header_row(days, dates, ids)
-        self.assertEqual(header, 2)
-        self.assertEqual(next_append_row(ids, header), 3)
-        self.assertEqual(next_append_row(["", "ID", "17110853300", ""], header), 4)
+    def test_september_ledger_starts_at_row_105(self) -> None:
+        self.assertTrue(uses_ledger_start("GROUP U AUD SEPTEMBER 2026"))
+        self.assertFalse(uses_ledger_start("GROUP N DUMMY"))
+        self.assertEqual(
+            next_append_row(["ID"] + [""] * 110, first_data_row=LEDGER_FIRST_DATA_ROW),
+            105,
+        )
+        ids = [""] * 103 + ["ID", "17110853300", "17110853301"]
+        self.assertEqual(next_append_row(ids, first_data_row=105), 107)
         self.assertEqual(next_append_row(["ID", "17110853300"], 1), 3)
-        self.assertEqual(next_append_row([], 0), 1)
 
     def test_bank_clear_range_skips_header(self) -> None:
         start, end = bank_clear_range(["ID", "17110853300", "17110853301"])

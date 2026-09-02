@@ -10,6 +10,15 @@ from src.errors import ConfigError
 from src.mapper import date_key, pad_sheet_row, sheet_tab_name
 from src.models import Transaction
 
+# GROUP U AUD SEPTEMBER 2026 day tabs have the ledger headings above row 105.
+LEDGER_FIRST_DATA_ROW = 105
+LEDGER_TITLE_MARKERS = ("group u aud september",)
+
+
+def uses_ledger_start(spreadsheet_title: str) -> bool:
+    title = (spreadsheet_title or "").strip().lower()
+    return any(marker in title for marker in LEDGER_TITLE_MARKERS)
+
 
 def day_tab_candidates(day_number: str) -> list[str]:
     number = str(int(day_number))
@@ -52,6 +61,9 @@ class SheetClient:
         client = gspread.service_account(filename=str(credentials_path))
         try:
             self.spreadsheet = client.open_by_key(sheet_id)
+            self._ledger_start = (
+                LEDGER_FIRST_DATA_ROW if uses_ledger_start(self.spreadsheet.title) else 0
+            )
             self._fallback_title = (worksheet or "").strip()
             if self._fallback_title:
                 self.ws = self.spreadsheet.worksheet(self._fallback_title)
@@ -101,10 +113,10 @@ class SheetClient:
         raise last_error or RuntimeError("Google Sheets read failed.")
 
     def next_empty_row(self) -> int:
-        days = self.ws.col_values(1)
-        dates = self.ws.col_values(2)
         ids = self.ws.col_values(7)
-        return next_append_row(ids, find_header_row(days, dates, ids))
+        if self._ledger_start:
+            return next_append_row(ids, first_data_row=self._ledger_start)
+        return len(ids) + 1
 
     def clear_bank_names(self) -> int:
         last_error: Exception | None = None
@@ -176,8 +188,20 @@ def find_header_row(day_col: list[str], date_col: list[str], id_col: list[str]) 
     return 0
 
 
-def next_append_row(id_col: list[str], header_row: int = 0) -> int:
-    """First row below the headings that does not already have a transaction ID."""
+def next_append_row(
+    id_col: list[str], header_row: int = 0, first_data_row: int = 0
+) -> int:
+    """First row that can take a new transaction ID.
+
+    GROUP U AUD SEPTEMBER 2026 day tabs always start at row 105.
+    Other sheets keep their existing append-after-last-ID behavior.
+    """
+    if first_data_row:
+        last_data = first_data_row - 1
+        for index, value in enumerate(id_col, start=1):
+            if index >= first_data_row and str(value).strip().isdigit():
+                last_data = index
+        return max(last_data + 1, first_data_row)
     first_allowed = header_row + 1 if header_row else 1
     last_data = header_row
     for index, value in enumerate(id_col, start=1):

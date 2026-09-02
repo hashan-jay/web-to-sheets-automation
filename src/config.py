@@ -124,6 +124,16 @@ def active_login_slot() -> int:
     return login_slot(os.getenv("LOGIN_ACTIVE_SLOT", "1"))
 
 
+def load_gui_theme() -> str:
+    _load_env()
+    value = os.getenv("GUI_THEME", "light").strip().lower()
+    return "dark" if value == "dark" else "light"
+
+
+def persist_gui_theme(theme: str) -> None:
+    persist_env_values({"GUI_THEME": "dark" if theme == "dark" else "light"})
+
+
 def persist_login_account(
     slot: int, website: str, username: str, password: str, twofa: str
 ) -> None:
