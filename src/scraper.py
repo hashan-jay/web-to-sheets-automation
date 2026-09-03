@@ -120,107 +120,145 @@ PAGE_IDS_JS = r"""
 )).map((tr) => (tr.getAttribute("data-id") || "").trim()).filter(Boolean)
 """
 
-SELECT_DATES_JS = r"""
-(args) => {
-  const from = String((args && args.from) || "").trim();
-  const to = String((args && args.to) || from).trim();
-  const ymd = (raw) => {
-    const match = String(raw || "").match(/(\d{4}-\d{2}-\d{2})/);
-    return match ? match[1] : "";
+DATE_INPUTS_JS = r"""
+() => {
+  const skip = (el) => {
+    const hay = ((el.placeholder || "") + " " + (el.name || "") + " " +
+      (el.id || "")).toLowerCase();
+    return hay.includes("amount") || hay.includes("min") || hay.includes("max");
   };
-  const compact = (raw) => String(raw || "").replace(/\s+/g, "");
-  const isDoubled = (raw) => /^(\d{4}-\d{2}-\d{2})\1$/.test(compact(raw));
-  const alreadySelected = (el, wanted) => {
-    const raw = String((el && el.value) || "").trim();
-    return Boolean(wanted) && ymd(raw) === wanted && !isDoubled(raw) && compact(raw).length <= 10;
+  const fromRow = () => {
+    const nodes = Array.from(document.querySelectorAll("label, span, td, th, div, p, strong, dt"));
+    for (const node of nodes) {
+      const text = String(node.textContent || "").replace(/\s+/g, " ").trim();
+      if (!/^date\s*:?$/i.test(text)) continue;
+      const row = node.closest("tr, .form-group, .form-item, .row, li, dl") || node.parentElement;
+      if (!row) continue;
+      const inputs = Array.from(row.querySelectorAll("input")).filter((el) => !skip(el));
+      if (inputs.length) return inputs.slice(0, 2);
+    }
+    return [];
   };
-  const dateInputs = Array.from(document.querySelectorAll("input")).filter((el) => {
+  const fallback = () => Array.from(document.querySelectorAll("input")).filter((el) => {
+    if (skip(el)) return false;
     const hay = ((el.name || "") + " " + (el.id || "") + " " +
       (el.placeholder || "") + " " + (el.className || "") + " " +
       (el.type || "")).toLowerCase();
-    if (hay.includes("amount") || hay.includes("min") || hay.includes("max")) return false;
     return hay.includes("date") || el.type === "date";
   });
-  const jq = window.jQuery || window.$;
-  const parseWanted = (wanted) => {
-    const parts = wanted.split("-").map(Number);
-    if (parts.length !== 3 || parts.some((n) => !n)) return null;
-    return { year: parts[0], month: parts[1], day: parts[2] };
+  const inputs = fromRow().length ? fromRow() : fallback();
+  return {
+    count: inputs.length,
+    values: inputs.map((el) => String(el.value || "").trim()),
+    placeholders: inputs.map((el) => String(el.placeholder || "").trim()),
   };
-  const isToday = (wanted) => {
-    const now = new Date();
-    const parts = parseWanted(wanted);
-    return Boolean(parts) &&
-      now.getFullYear() === parts.year &&
-      now.getMonth() + 1 === parts.month &&
-      now.getDate() === parts.day;
+}
+"""
+
+OPEN_DATE_INPUT_JS = r"""
+(index) => {
+  const skip = (el) => {
+    const hay = ((el.placeholder || "") + " " + (el.name || "") + " " +
+      (el.id || "")).toLowerCase();
+    return hay.includes("amount") || hay.includes("min") || hay.includes("max");
   };
+  const fromRow = () => {
+    const nodes = Array.from(document.querySelectorAll("label, span, td, th, div, p, strong, dt"));
+    for (const node of nodes) {
+      const text = String(node.textContent || "").replace(/\s+/g, " ").trim();
+      if (!/^date\s*:?$/i.test(text)) continue;
+      const row = node.closest("tr, .form-group, .form-item, .row, li, dl") || node.parentElement;
+      if (!row) continue;
+      const inputs = Array.from(row.querySelectorAll("input")).filter((el) => !skip(el));
+      if (inputs.length) return inputs.slice(0, 2);
+    }
+    return [];
+  };
+  const fallback = () => Array.from(document.querySelectorAll("input")).filter((el) => {
+    if (skip(el)) return false;
+    const hay = ((el.name || "") + " " + (el.id || "") + " " +
+      (el.placeholder || "") + " " + (el.className || "") + " " +
+      (el.type || "")).toLowerCase();
+    return hay.includes("date") || el.type === "date";
+  });
+  const inputs = fromRow().length ? fromRow() : fallback();
+  const el = inputs[Number(index) || 0];
+  if (!el) return false;
+  el.scrollIntoView({ block: "center", inline: "nearest" });
+  el.focus();
+  el.click();
+  return true;
+}
+"""
+
+CLICK_CALENDAR_YMD_JS = r"""
+(wanted) => {
+  const parts = String(wanted || "").split("-").map(Number);
+  if (parts.length !== 3 || !parts[0] || !parts[1] || !parts[2]) return false;
+  const year = parts[0];
+  const month = parts[1];
+  const day = String(parts[2]);
+  const monthNames = [
+    "january", "february", "march", "april", "may", "june",
+    "july", "august", "september", "october", "november", "december"
+  ];
+  const shortNames = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
   const visiblePickers = () => Array.from(document.querySelectorAll(
     ".datepicker-dropdown, .datepicker.dropdown-menu, .datepicker, " +
-    ".ui-datepicker, .flatpickr-calendar, .daterangepicker, .xdsoft_datetimepicker"
+    ".ui-datepicker, .flatpickr-calendar.open, .flatpickr-calendar, " +
+    ".daterangepicker, .xdsoft_datetimepicker"
   )).filter((root) => {
     if (!root || root.offsetParent === null) return false;
     const style = window.getComputedStyle(root);
     return style.display !== "none" && style.visibility !== "hidden";
   });
-  const clickTodayOrDay = (wanted) => {
-    const parts = parseWanted(wanted);
-    if (!parts) return false;
-    const pickers = visiblePickers();
-    for (const root of pickers) {
-      if (isToday(wanted)) {
-        const today = root.querySelector(
-          "td.today:not(.old):not(.new), td.day.today, .ui-datepicker-today a, " +
-          ".flatpickr-day.today, button.today, .datepicker-days td.today"
-        );
-        if (today) {
-          today.click();
-          return true;
-        }
-      }
-      const cells = Array.from(root.querySelectorAll(
-        "td.day:not(.old):not(.new), td[data-date], " +
-        ".ui-datepicker-calendar td a, .flatpickr-day:not(.prevMonthDay):not(.nextMonthDay)"
-      ));
-      const cell = cells.find((td) => String(td.textContent || "").trim() === String(parts.day));
-      if (cell) {
-        cell.click();
-        return true;
+  const readTitle = (root) => {
+    const el = root.querySelector(
+      ".datepicker-switch, .datepicker-days .datepicker-switch, " +
+      ".ui-datepicker-title, .flatpickr-current-month, .monthselect, .yearselect"
+    );
+    const text = el ? String(el.textContent || "").replace(/\s+/g, " ").trim().toLowerCase() : "";
+    let y = 0;
+    let m = 0;
+    const yearMatch = text.match(/(20\d{2})/);
+    if (yearMatch) y = Number(yearMatch[1]);
+    for (let i = 0; i < 12; i++) {
+      if (text.includes(monthNames[i])) { m = i + 1; break; }
+    }
+    if (!m) {
+      for (let i = 0; i < 12; i++) {
+        if (new RegExp("\\\\b" + shortNames[i] + "\\\\b").test(text)) { m = i + 1; break; }
       }
     }
-    return false;
+    return { year: y, month: m };
   };
-  const selectOne = (el, wanted) => {
-    if (!el || !wanted) return "skip";
-    if (alreadySelected(el, wanted)) return "already";
-    if (jq && jq.fn) {
-      const $el = jq(el);
-      try {
-        if ($el.data("datepicker") || $el.hasClass("hasDatepicker")) {
-          const parts = parseWanted(wanted);
-          if (parts) $el.datepicker("setDate", new Date(parts.year, parts.month - 1, parts.day));
-          if (alreadySelected(el, wanted)) return "widget";
-        }
-      } catch (err) {}
-      try {
-        const drp = $el.data("daterangepicker");
-        if (drp) {
-          drp.setStartDate(wanted);
-          drp.setEndDate(wanted);
-          if (alreadySelected(el, wanted)) return "widget";
-        }
-      } catch (err) {}
+  const pickers = visiblePickers();
+  for (const root of pickers) {
+    for (let step = 0; step < 36; step++) {
+      const title = readTitle(root);
+      if (title.year === year && title.month === month) break;
+      if (!title.year || !title.month) break;
+      const before = title.year * 12 + title.month;
+      const target = year * 12 + month;
+      const selector = before > target
+        ? ".prev, .datepicker-prev, .ui-datepicker-prev, .flatpickr-prev-month"
+        : ".next, .datepicker-next, .ui-datepicker-next, .flatpickr-next-month";
+      const btn = root.querySelector(selector);
+      if (!btn) break;
+      btn.click();
     }
-    el.focus();
-    el.click();
-    if (clickTodayOrDay(wanted)) return "picked";
-    return "opened";
-  };
-  const first = dateInputs[0];
-  const second = dateInputs[1];
-  const results = [selectOne(first, from)];
-  if (second && second !== first) results.push(selectOne(second, to));
-  return { count: dateInputs.length, results };
+    const cells = Array.from(root.querySelectorAll(
+      "td.day:not(.old):not(.new), td[data-date]:not(.old):not(.new), " +
+      ".ui-datepicker-calendar td:not(.ui-datepicker-other-month) a, " +
+      ".flatpickr-day:not(.prevMonthDay):not(.nextMonthDay):not(.flatpickr-disabled)"
+    ));
+    const cell = cells.find((td) => String(td.textContent || "").trim() === day);
+    if (cell) {
+      cell.click();
+      return true;
+    }
+  }
+  return false;
 }
 """
 
@@ -568,64 +606,56 @@ def _click_search(page: Page) -> None:
             return
 
 
-def _click_visible_calendar_day(page: Page, day: str) -> bool:
-    wanted = (day or "").strip()
+def _ymd(text: object) -> str:
+    match = re.search(r"(\d{4}-\d{2}-\d{2})", str(text or ""))
+    return match.group(1) if match else ""
+
+
+def _date_input_values(page: Page) -> list[str]:
+    try:
+        raw = page.evaluate(DATE_INPUTS_JS)
+    except Exception:
+        raw = {}
+    return [str(item or "").strip() for item in (raw or {}).get("values") or []]
+
+
+def _date_index_matches(page: Page, index: int, wanted: str) -> bool:
+    values = _date_input_values(page)
+    if index >= len(values):
+        return False
+    compact = re.sub(r"\s+", "", values[index])
+    doubled = bool(re.match(r"^(\d{4}-\d{2}-\d{2})\1$", compact))
+    return _ymd(values[index]) == wanted and not doubled and len(compact) <= 10
+
+
+def _pick_date_at_index(page: Page, index: int, wanted: str) -> bool:
     if not wanted:
         return False
-    day_number = wanted.split("-")[-1].lstrip("0") or "0"
-    selectors = (
-        "td.today:not(.old):not(.new)",
-        "td.day.today",
-        ".datepicker-days td.today",
-        ".ui-datepicker-today a",
-        ".flatpickr-day.today",
-        "button.today",
-    )
-    for selector in selectors:
-        locator = page.locator(selector)
+    for _attempt in range(3):
         try:
-            if locator.count() and locator.first.is_visible():
-                locator.first.click(timeout=1500)
-                return True
+            opened = bool(page.evaluate(OPEN_DATE_INPUT_JS, index))
         except Exception:
-            continue
-    day_cells = page.locator(
-        "td.day:not(.old):not(.new), .ui-datepicker-calendar td a, "
-        ".flatpickr-day:not(.prevMonthDay):not(.nextMonthDay)"
-    )
-    try:
-        count = day_cells.count()
-    except Exception:
-        count = 0
-    for index in range(count):
-        cell = day_cells.nth(index)
+            opened = False
+        if not opened:
+            return False
+        page.wait_for_timeout(220)
         try:
-            if cell.is_visible() and (cell.inner_text() or "").strip() == day_number:
-                cell.click(timeout=1500)
-                return True
+            picked = bool(page.evaluate(CLICK_CALENDAR_YMD_JS, wanted))
         except Exception:
-            continue
-    return False
+            picked = False
+        if picked:
+            page.wait_for_timeout(220)
+        if _date_index_matches(page, index, wanted):
+            return True
+    return _date_index_matches(page, index, wanted)
 
 
 def _select_filter_dates(page: Page, day: str, end: str) -> None:
     wanted = (day or "").strip()
     until = (end or day or "").strip()
-    try:
-        result = page.evaluate(SELECT_DATES_JS, {"from": wanted, "to": until})
-    except Exception:
-        result = {}
-    states = list((result or {}).get("results") or [])
-    if "opened" in states:
-        page.wait_for_timeout(250)
-        if not _click_visible_calendar_day(page, wanted):
-            try:
-                page.evaluate(SELECT_DATES_JS, {"from": wanted, "to": until})
-            except Exception:
-                pass
-            page.wait_for_timeout(200)
-            _click_visible_calendar_day(page, wanted)
-    page.wait_for_timeout(150)
+    _pick_date_at_index(page, 0, wanted)
+    _pick_date_at_index(page, 1, until)
+    page.wait_for_timeout(120)
 
 
 def _apply_filters(page: Page, settings: Settings) -> None:
