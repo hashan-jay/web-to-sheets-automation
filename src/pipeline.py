@@ -222,6 +222,7 @@ def copy_pending_to_sheet(
     on_event: EventFn | None = None,
     dry_run: bool = False,
     only_ids: set[str] | None = None,
+    one_by_one: bool = False,
 ) -> PipelineResult:
     result = PipelineResult()
     pending = db.pending()
@@ -270,7 +271,17 @@ def copy_pending_to_sheet(
             message=f"{_sheet_label(sheet)}: sending rows.",
         )
         for day, txns in groups.items():
-            _write_day_rows(settings, db, sheet, day, txns, result, on_event, action="Copied")
+            _write_day_rows(
+                settings,
+                db,
+                sheet,
+                day,
+                txns,
+                result,
+                on_event,
+                action="Copied",
+                one_by_one=one_by_one,
+            )
     return result
 
 
@@ -283,6 +294,7 @@ def run_pipeline(
     write_sheet: bool = False,
     only_ids: set[str] | None = None,
     once: bool = False,
+    one_by_one: bool = False,
 ) -> PipelineResult:
     db = GatheringDB(settings.database_path)
     totals = PipelineResult()
@@ -303,6 +315,7 @@ def run_pipeline(
             on_event,
             dry_run=dry_run,
             only_ids=only_ids,
+            one_by_one=one_by_one,
         )
         totals.copied = copied.copied
         totals.skipped = copied.skipped
@@ -470,6 +483,7 @@ def _write_day_rows(
     result: PipelineResult,
     on_event: EventFn | None,
     action: str,
+    one_by_one: bool = False,
 ) -> None:
     try:
         sheet.use_day(day)
@@ -504,6 +518,7 @@ def _write_day_rows(
         kind="log",
         message=(
             f"{_sheet_label(sheet)}: writing {len(to_copy)} row(s) "
+            f"{'one by one ' if one_by_one else ''}"
             f"to tab {sheet.tab_title()}."
         ),
     )
@@ -522,6 +537,52 @@ def _write_day_rows(
                 + "."
             ),
         )
+    detail = (
+        f"Row appended to Google Sheet tab {sheet.tab_title()}"
+        if action == "Copied"
+        else f"Missing row restored to Google Sheet tab {sheet.tab_title()}"
+    )
+    if one_by_one:
+        for txn in to_copy:
+            _emit(
+                on_event,
+                **txn_row_event(
+                    txn,
+                    "Copying",
+                    _row_detail(
+                        txn,
+                        f"Writing row to {_sheet_label(sheet)} tab {sheet.tab_title()}",
+                    ),
+                ),
+            )
+            try:
+                sheet.write_row(to_sheet_row(txn, settings, games=games))
+            except Exception as exc:
+                _emit(
+                    on_event,
+                    kind="log",
+                    message=(
+                        f"{_sheet_label(sheet)}: write failed for "
+                        f"{txn.transaction_id} on tab {sheet.tab_title()}: {exc}"
+                    ),
+                )
+                db.mark(txn.transaction_id, "failed", str(exc))
+                result.failed += 1
+                _emit(on_event, **txn_row_event(txn, "Failed", str(exc)))
+                continue
+            db.mark(txn.transaction_id, "copied", detail)
+            result.copied += 1
+            _emit(on_event, **txn_row_event(txn, "Copied", _row_detail(txn, detail)))
+            _emit(
+                on_event,
+                kind="log",
+                message=(
+                    f"{_sheet_label(sheet)}: sent {txn.transaction_id} "
+                    f"to tab {sheet.tab_title()}."
+                ),
+            )
+        _blank_sheet_bank(sheet, on_event)
+        return
     rows = [to_sheet_row(txn, settings, games=games) for txn in to_copy]
     for txn in to_copy:
         _emit(
@@ -561,11 +622,6 @@ def _write_day_rows(
             result.failed += 1
             _emit(on_event, **txn_row_event(txn, "Failed", str(exc)))
         return
-    detail = (
-        f"Row appended to Google Sheet tab {sheet.tab_title()}"
-        if action == "Copied"
-        else f"Missing row restored to Google Sheet tab {sheet.tab_title()}"
-    )
     for txn in to_copy:
         db.mark(txn.transaction_id, "copied", detail)
         result.copied += 1

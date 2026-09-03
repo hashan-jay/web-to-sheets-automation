@@ -264,6 +264,7 @@ class FinanceAutomationApp:
         self.google_sheet_2 = self.google_sheet_vars[1]
         self.dark_mode = tk.BooleanVar(value=load_gui_theme() == "dark")
         self.auto_running = False
+        self.auto_send_to_sheet = tk.BooleanVar(value=False)
         self._single_run_active = False
         self._auto_after_id: str | None = None
         self._auto_deadline = 0.0
@@ -424,6 +425,12 @@ class FinanceAutomationApp:
         )
         style.configure(
             "TCheckbutton",
+            background=colors["card"],
+            foreground=colors["title"],
+            font=("Segoe UI", 9),
+        )
+        style.configure(
+            "Check.TLabel",
             background=colors["card"],
             foreground=colors["title"],
             font=("Segoe UI", 9),
@@ -725,6 +732,21 @@ class FinanceAutomationApp:
             textvariable=self.auto_interval,
             width=8,
         ).pack(side="right")
+        auto_send_row = ttk.Frame(sidebar, style="Card.TFrame")
+        auto_send_row.pack(fill="x", pady=(6, 4))
+        ttk.Checkbutton(
+            auto_send_row,
+            variable=self.auto_send_to_sheet,
+            command=self._on_auto_send_toggled,
+        ).pack(side="left", anchor="n")
+        auto_send_label = ttk.Label(
+            auto_send_row,
+            text="Send Extracted records to Google Sheet Automatically",
+            style="Check.TLabel",
+            wraplength=250,
+        )
+        auto_send_label.pack(side="left", fill="x", expand=True, padx=(4, 0))
+        auto_send_label.bind("<Button-1>", self._toggle_auto_send)
         ttk.Button(
             sidebar,
             text="Automated Run",
@@ -739,7 +761,7 @@ class FinanceAutomationApp:
         ).pack(fill="x", pady=3)
         ttk.Label(
             sidebar,
-            text="Automated Run scrapes Completed on this timer and adds only new IDs to Latest scrape. Stop Automated Run ends the loop.",
+            text="Automated Run scrapes Completed on this timer and adds only new IDs to Latest scrape. When the box above is checked, each extracted record is sent to the Google Sheet one by one. Stop Automated Run ends the loop.",
             style="Muted.TLabel",
             wraplength=280,
         ).pack(anchor="w", pady=(4, 10))
@@ -981,11 +1003,13 @@ class FinanceAutomationApp:
         )
         self.latest_type_combo.pack(side="left", padx=(6, 8))
         self.latest_type_combo.bind("<<ComboboxSelected>>", self._on_filters_changed)
-        ttk.Button(
+        self.send_latest_btn = ttk.Button(
             controls,
             text="Send latest scrape to Google Sheet",
             command=self._send_latest_to_sheet,
-        ).pack(side="left", padx=(0, 8))
+        )
+        self.send_latest_btn.pack(side="left", padx=(0, 8))
+        self._on_auto_send_toggled()
         ttk.Button(controls, text="Clear this scrape", command=self._clear_latest).pack(side="left")
         ttk.Label(
             page,
@@ -1481,6 +1505,31 @@ class FinanceAutomationApp:
             value = 60
         return max(5, value)
 
+    def _toggle_auto_send(self, _event=None) -> None:
+        self.auto_send_to_sheet.set(not self.auto_send_to_sheet.get())
+        self._on_auto_send_toggled()
+
+    def _on_auto_send_toggled(self) -> None:
+        button = getattr(self, "send_latest_btn", None)
+        if button is None:
+            return
+        if self.auto_send_to_sheet.get():
+            button.state(["disabled"])
+        else:
+            button.state(["!disabled"])
+
+    def _auto_write_sheet(self) -> bool:
+        if not self.auto_send_to_sheet.get():
+            return False
+        self._persist_google_sheets()
+        if self._sheet_id_from_field(1):
+            return True
+        self._append_log(
+            "Send Extracted records to Google Sheet Automatically is checked, "
+            "but Sheet 1 is empty. This scrape will not write the sheet."
+        )
+        return False
+
     def _start_automated_run(self) -> None:
         if self.auto_running:
             messagebox.showinfo("Already running", "Automated Run is already active.")
@@ -1490,6 +1539,17 @@ class FinanceAutomationApp:
         if self._busy():
             messagebox.showinfo("Busy", "A run is already in progress.")
             return
+        write_sheet = False
+        if self.auto_send_to_sheet.get():
+            self._persist_google_sheets()
+            if not self._sheet_id_from_field(1):
+                messagebox.showwarning(
+                    "Google Sheet required",
+                    "Paste the Google Sheet URL or ID into Sheet 1 before using "
+                    "Send Extracted records to Google Sheet Automatically.",
+                )
+                return
+            write_sheet = True
         self._persist_login_fields()
         self.poll_interval.set(self._auto_interval_seconds())
         self._single_run_active = False
@@ -1499,13 +1559,25 @@ class FinanceAutomationApp:
         self.pages.select(0)
         seconds = self._auto_interval_seconds()
         self.status_text.set(f"Automated run every {seconds}s")
-        self._append_log(
-            f"Automated Run started. Scraping Completed every {seconds}s. "
-            "Already scraped IDs are skipped in Latest scrape. "
-            "The Google Sheet is not updated until you send."
-        )
+        if write_sheet:
+            self._append_log(
+                f"Automated Run started. Scraping Completed every {seconds}s. "
+                "Already scraped IDs are skipped in Latest scrape. "
+                "Each extracted record will be sent to the Google Sheet automatically."
+            )
+        else:
+            self._append_log(
+                f"Automated Run started. Scraping Completed every {seconds}s. "
+                "Already scraped IDs are skipped in Latest scrape. "
+                "The Google Sheet is not updated until you send."
+            )
         try:
-            started = self._start_job(scrape=True, write_sheet=False, quiet=True)
+            started = self._start_job(
+                scrape=True,
+                write_sheet=write_sheet,
+                quiet=True,
+                one_by_one=write_sheet,
+            )
             if not started:
                 self._schedule_next_auto()
         except Exception as exc:
@@ -1563,12 +1635,23 @@ class FinanceAutomationApp:
             return
         self.capturing_latest = True
         self.pages.select(0)
+        write_sheet = self._auto_write_sheet()
         self._append_log(
             f"Automated Run tick: scraping Completed for {self._scrape_date()} "
             f"on {normalize_dashboard_url(self.login_website.get())}."
+            + (
+                " New extracted records will be sent to the Google Sheet one by one."
+                if write_sheet
+                else ""
+            )
         )
         try:
-            started = self._start_job(scrape=True, write_sheet=False, quiet=True)
+            started = self._start_job(
+                scrape=True,
+                write_sheet=write_sheet,
+                quiet=True,
+                one_by_one=write_sheet,
+            )
             if not started:
                 self._schedule_next_auto()
         except Exception as exc:
@@ -1737,6 +1820,13 @@ class FinanceAutomationApp:
             self._append_log(f"Run now failed: {exc}")
 
     def _send_latest_to_sheet(self) -> None:
+        if self.auto_send_to_sheet.get():
+            messagebox.showinfo(
+                "Automatic send is on",
+                "Turn off Send Extracted records to Google Sheet Automatically "
+                "to send the latest scrape manually.",
+            )
+            return
         if self._busy():
             messagebox.showinfo("Busy", "A run is already in progress.")
             return
@@ -1849,17 +1939,26 @@ class FinanceAutomationApp:
         write_sheet: bool = False,
         quiet: bool = False,
         once: bool = False,
+        one_by_one: bool = False,
     ) -> bool:
         if self._busy():
             if not quiet:
                 messagebox.showinfo("Busy", "A run is already in progress.")
             return False
-        self.status_text.set("Running...")
+        self.status_text.set(
+            "Running and sending to Google Sheet..." if write_sheet else "Running..."
+        )
         settings = self._current_settings()
+        if write_sheet:
+            sheet_note = (
+                "Each extracted record will be sent to the Google Sheet automatically."
+            )
+        else:
+            sheet_note = "The sheet is not updated yet."
         self._append_log(
             f"Opening {settings.dashboard_url} as {settings.dashboard_username} "
             f"and gathering Completed transactions for {settings.filter_date_from}. "
-            "The sheet is not updated yet."
+            f"{sheet_note}"
         )
         if settings.dashboard_2fa:
             self._append_log("Using the 2FA code from the Website login section.")
@@ -1874,6 +1973,7 @@ class FinanceAutomationApp:
                     scrape=scrape,
                     write_sheet=write_sheet,
                     once=once,
+                    one_by_one=one_by_one,
                 )
             except Exception as exc:
                 self.events.put({"kind": "log", "message": f"Run failed: {exc}"})
@@ -1903,6 +2003,7 @@ class FinanceAutomationApp:
                 self._append_log(f"Event handler error: {exc}")
         if not self._busy() and self.status_text.get() in {
             "Running...",
+            "Running and sending to Google Sheet...",
             "Sending to Google Sheet...",
             "Syncing Google Sheet...",
         }:
@@ -1939,6 +2040,8 @@ class FinanceAutomationApp:
                 self._upsert_row(event, bucket="latest")
             if status in {"Copied", "Skipped"}:
                 self._upsert_row(event, bucket="sent")
+                if txn_id:
+                    self.sheet_id_cache.add(txn_id)
         if event.get("message"):
             self._append_log(str(event["message"]))
         if event.get("counts"):
@@ -1997,6 +2100,11 @@ class FinanceAutomationApp:
                     self._refresh_counts()
                 except Exception as exc:
                     self._append_log(f"Could not refresh counts: {exc}")
+                if self.auto_send_to_sheet.get():
+                    try:
+                        self._refresh_unsent_latest(log=False)
+                    except Exception as exc:
+                        self._append_log(f"Could not refresh unsent rows: {exc}")
                 return
             self.capturing_latest = False
             self.status_text.set("Idle")
