@@ -120,23 +120,107 @@ PAGE_IDS_JS = r"""
 )).map((tr) => (tr.getAttribute("data-id") || "").trim()).filter(Boolean)
 """
 
-SET_DATES_JS = r"""
-(from, to) => {
-  const inputs = Array.from(document.querySelectorAll("input")).filter((el) => {
+SELECT_DATES_JS = r"""
+(args) => {
+  const from = String((args && args.from) || "").trim();
+  const to = String((args && args.to) || from).trim();
+  const ymd = (raw) => {
+    const match = String(raw || "").match(/(\d{4}-\d{2}-\d{2})/);
+    return match ? match[1] : "";
+  };
+  const compact = (raw) => String(raw || "").replace(/\s+/g, "");
+  const isDoubled = (raw) => /^(\d{4}-\d{2}-\d{2})\1$/.test(compact(raw));
+  const alreadySelected = (el, wanted) => {
+    const raw = String((el && el.value) || "").trim();
+    return Boolean(wanted) && ymd(raw) === wanted && !isDoubled(raw) && compact(raw).length <= 10;
+  };
+  const dateInputs = Array.from(document.querySelectorAll("input")).filter((el) => {
     const hay = ((el.name || "") + " " + (el.id || "") + " " +
-      (el.placeholder || "") + " " + (el.type || "")).toLowerCase();
+      (el.placeholder || "") + " " + (el.className || "") + " " +
+      (el.type || "")).toLowerCase();
+    if (hay.includes("amount") || hay.includes("min") || hay.includes("max")) return false;
     return hay.includes("date") || el.type === "date";
   });
-  const fill = (el, value) => {
-    if (!el || !value) return;
-    el.focus();
-    el.value = value;
-    el.dispatchEvent(new Event("input", { bubbles: true }));
-    el.dispatchEvent(new Event("change", { bubbles: true }));
+  const jq = window.jQuery || window.$;
+  const parseWanted = (wanted) => {
+    const parts = wanted.split("-").map(Number);
+    if (parts.length !== 3 || parts.some((n) => !n)) return null;
+    return { year: parts[0], month: parts[1], day: parts[2] };
   };
-  if (inputs[0]) fill(inputs[0], from);
-  if (inputs[1]) fill(inputs[1], to || from);
-  return inputs.length;
+  const isToday = (wanted) => {
+    const now = new Date();
+    const parts = parseWanted(wanted);
+    return Boolean(parts) &&
+      now.getFullYear() === parts.year &&
+      now.getMonth() + 1 === parts.month &&
+      now.getDate() === parts.day;
+  };
+  const visiblePickers = () => Array.from(document.querySelectorAll(
+    ".datepicker-dropdown, .datepicker.dropdown-menu, .datepicker, " +
+    ".ui-datepicker, .flatpickr-calendar, .daterangepicker, .xdsoft_datetimepicker"
+  )).filter((root) => {
+    if (!root || root.offsetParent === null) return false;
+    const style = window.getComputedStyle(root);
+    return style.display !== "none" && style.visibility !== "hidden";
+  });
+  const clickTodayOrDay = (wanted) => {
+    const parts = parseWanted(wanted);
+    if (!parts) return false;
+    const pickers = visiblePickers();
+    for (const root of pickers) {
+      if (isToday(wanted)) {
+        const today = root.querySelector(
+          "td.today:not(.old):not(.new), td.day.today, .ui-datepicker-today a, " +
+          ".flatpickr-day.today, button.today, .datepicker-days td.today"
+        );
+        if (today) {
+          today.click();
+          return true;
+        }
+      }
+      const cells = Array.from(root.querySelectorAll(
+        "td.day:not(.old):not(.new), td[data-date], " +
+        ".ui-datepicker-calendar td a, .flatpickr-day:not(.prevMonthDay):not(.nextMonthDay)"
+      ));
+      const cell = cells.find((td) => String(td.textContent || "").trim() === String(parts.day));
+      if (cell) {
+        cell.click();
+        return true;
+      }
+    }
+    return false;
+  };
+  const selectOne = (el, wanted) => {
+    if (!el || !wanted) return "skip";
+    if (alreadySelected(el, wanted)) return "already";
+    if (jq && jq.fn) {
+      const $el = jq(el);
+      try {
+        if ($el.data("datepicker") || $el.hasClass("hasDatepicker")) {
+          const parts = parseWanted(wanted);
+          if (parts) $el.datepicker("setDate", new Date(parts.year, parts.month - 1, parts.day));
+          if (alreadySelected(el, wanted)) return "widget";
+        }
+      } catch (err) {}
+      try {
+        const drp = $el.data("daterangepicker");
+        if (drp) {
+          drp.setStartDate(wanted);
+          drp.setEndDate(wanted);
+          if (alreadySelected(el, wanted)) return "widget";
+        }
+      } catch (err) {}
+    }
+    el.focus();
+    el.click();
+    if (clickTodayOrDay(wanted)) return "picked";
+    return "opened";
+  };
+  const first = dateInputs[0];
+  const second = dateInputs[1];
+  const results = [selectOne(first, from)];
+  if (second && second !== first) results.push(selectOne(second, to));
+  return { count: dateInputs.length, results };
 }
 """
 
@@ -484,6 +568,66 @@ def _click_search(page: Page) -> None:
             return
 
 
+def _click_visible_calendar_day(page: Page, day: str) -> bool:
+    wanted = (day or "").strip()
+    if not wanted:
+        return False
+    day_number = wanted.split("-")[-1].lstrip("0") or "0"
+    selectors = (
+        "td.today:not(.old):not(.new)",
+        "td.day.today",
+        ".datepicker-days td.today",
+        ".ui-datepicker-today a",
+        ".flatpickr-day.today",
+        "button.today",
+    )
+    for selector in selectors:
+        locator = page.locator(selector)
+        try:
+            if locator.count() and locator.first.is_visible():
+                locator.first.click(timeout=1500)
+                return True
+        except Exception:
+            continue
+    day_cells = page.locator(
+        "td.day:not(.old):not(.new), .ui-datepicker-calendar td a, "
+        ".flatpickr-day:not(.prevMonthDay):not(.nextMonthDay)"
+    )
+    try:
+        count = day_cells.count()
+    except Exception:
+        count = 0
+    for index in range(count):
+        cell = day_cells.nth(index)
+        try:
+            if cell.is_visible() and (cell.inner_text() or "").strip() == day_number:
+                cell.click(timeout=1500)
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _select_filter_dates(page: Page, day: str, end: str) -> None:
+    wanted = (day or "").strip()
+    until = (end or day or "").strip()
+    try:
+        result = page.evaluate(SELECT_DATES_JS, {"from": wanted, "to": until})
+    except Exception:
+        result = {}
+    states = list((result or {}).get("results") or [])
+    if "opened" in states:
+        page.wait_for_timeout(250)
+        if not _click_visible_calendar_day(page, wanted):
+            try:
+                page.evaluate(SELECT_DATES_JS, {"from": wanted, "to": until})
+            except Exception:
+                pass
+            page.wait_for_timeout(200)
+            _click_visible_calendar_day(page, wanted)
+    page.wait_for_timeout(150)
+
+
 def _apply_filters(page: Page, settings: Settings) -> None:
     status = (settings.filter_status or COMPLETED_STATUS).strip() or COMPLETED_STATUS
     if status.upper() == "ANY":
@@ -495,18 +639,7 @@ def _apply_filters(page: Page, settings: Settings) -> None:
         page.evaluate(SET_STATUS_JS, status)
     except Exception:
         pass
-    date_inputs = page.locator('input[type="date"], input[placeholder*="Date" i]')
-    if date_inputs.count():
-        try:
-            date_inputs.nth(0).fill(day)
-            if date_inputs.count() > 1:
-                date_inputs.nth(1).fill(end)
-        except Exception:
-            pass
-    try:
-        page.evaluate(SET_DATES_JS, day, end)
-    except Exception:
-        pass
+    _select_filter_dates(page, day, end)
     _click_search(page)
     try:
         page.locator("#transactions-list tr[data-id]").first.wait_for(timeout=20000)
