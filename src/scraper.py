@@ -741,7 +741,7 @@ def scrape_transactions(
             "viewport": {"width": 1440, "height": 1100},
             "user_agent": _USER_AGENT,
             "locale": "en-AU",
-            "timezone_id": "Australia/Sydney",
+            "timezone_id": "Australia/Melbourne",
         }
         try:
             context = playwright.chromium.launch_persistent_context(
