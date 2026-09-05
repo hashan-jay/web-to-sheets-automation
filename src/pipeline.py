@@ -511,7 +511,7 @@ def _write_day_rows(
             detail=f"Already on Google Sheet tab {sheet.tab_title()}",
         )
     if not to_copy:
-        _blank_sheet_bank(sheet, on_event)
+        #_blank_sheet_bank(sheet, on_event)
         return
     _emit(
         on_event,
@@ -581,7 +581,7 @@ def _write_day_rows(
                     f"to tab {sheet.tab_title()}."
                 ),
             )
-        _blank_sheet_bank(sheet, on_event)
+        #_blank_sheet_bank(sheet, on_event)
         return
     rows = [to_sheet_row(txn, settings, games=games) for txn in to_copy]
     for txn in to_copy:
@@ -626,7 +626,7 @@ def _write_day_rows(
         db.mark(txn.transaction_id, "copied", detail)
         result.copied += 1
         _emit(on_event, **txn_row_event(txn, "Copied", _row_detail(txn, detail)))
-    _blank_sheet_bank(sheet, on_event)
+    #_blank_sheet_bank(sheet, on_event)
 
 
 def _sync_one_day(
@@ -679,7 +679,7 @@ def _sync_one_day(
                 f"already has every GUI record for {day}."
             ),
         )
-        _blank_sheet_bank(sheet, on_event)
+        #_blank_sheet_bank(sheet, on_event)
         return
     before = result.copied
     _write_day_rows(settings, db, sheet, day, missing, result, on_event, action="Restored")
