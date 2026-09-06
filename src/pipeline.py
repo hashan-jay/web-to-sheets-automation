@@ -679,6 +679,7 @@ def _sync_one_day(
                 f"already has every GUI record for {day}."
             ),
         )
+        # All (below function) statements have been commented so the user can change bank details of each row
         #_blank_sheet_bank(sheet, on_event)
         return
     before = result.copied
