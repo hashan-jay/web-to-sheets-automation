@@ -5,6 +5,7 @@ from src.models import Transaction
 from src.errors import ConfigError
 from src.sheets import (
     LEDGER_FIRST_DATA_ROW,
+    WITHDRAW_FIRST_DATA_ROW,
     bank_clear_range,
     day_tab_candidates,
     index_sheet_ids,
@@ -13,6 +14,7 @@ from src.sheets import (
     next_append_row,
     office_file_error,
     protected_range_error,
+    row_is_withdraw,
     uses_ledger_start,
     uses_locked_day_column,
 )
@@ -98,6 +100,34 @@ class SheetDedupeTests(unittest.TestCase):
         self.assertEqual(dummy_start, 2)
         self.assertEqual(dummy_range, "A2:L2")
         self.assertEqual(dummy_values[0][0], "2")
+
+    def test_withdrawals_start_at_row_1024(self) -> None:
+        self.assertEqual(WITHDRAW_FIRST_DATA_ROW, 1024)
+        self.assertEqual(
+            next_append_row(["ID"] + [""] * 1100, first_data_row=WITHDRAW_FIRST_DATA_ROW),
+            1024,
+        )
+        ids = [""] * 1023 + ["17110000001", "17110000002"]
+        self.assertEqual(next_append_row(ids, first_data_row=1024), 1026)
+        deposit_ids = [""] * 104 + ["17110000001"] + [""] * 20
+        self.assertEqual(
+            next_append_row(deposit_ids, first_data_row=105, last_data_row=1023),
+            106,
+        )
+        full = [""] * 104 + ["1"] * 919
+        self.assertEqual(next_append_row(full, first_data_row=105, last_data_row=1023), 0)
+        range_name, values, start = ledger_write_plan(
+            [["9", "2026-09-09", "", "Name", "-10", "Withdraw", "2", "FUCKSPIN", "", "A1", "", ""]],
+            start=20,
+            skip_day_column=False,
+            first_data_row=1024,
+        )
+        self.assertEqual(start, 1024)
+        self.assertEqual(range_name, "A1024:L1024")
+        self.assertTrue(row_is_withdraw(values[0]))
+        self.assertFalse(
+            row_is_withdraw(["9", "2026-09-09", "", "Name", "10", "Deposit", "1"])
+        )
 
     def test_bank_clear_range_skips_header(self) -> None:
         start, end = bank_clear_range(["ID", "17110853300", "17110853301"])

@@ -183,7 +183,19 @@ class SheetClient:
             return next_append_row(
                 ids, first_data_row=start_at, last_data_row=last_deposit
             )
-        return next_append_row(ids, last_data_row=last_deposit)
+        last_id = 0
+        for index, value in enumerate(ids, start=1):
+            if index > last_deposit:
+                break
+            if str(value).strip().isdigit():
+                last_id = index
+        if last_id:
+            nxt = last_id + 1
+            return nxt if nxt <= last_deposit else 0
+        start = len(ids) + 1
+        if start <= last_deposit:
+            return start
+        return 2
 
     def clear_bank_names(self) -> int:
         last_error: Exception | None = None

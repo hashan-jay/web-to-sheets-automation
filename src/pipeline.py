@@ -596,12 +596,24 @@ def _write_day_rows(
             db.mark(txn.transaction_id, "copied", detail)
             result.copied += 1
             _emit(on_event, **txn_row_event(txn, "Copied", _row_detail(txn, detail)))
+            start = getattr(sheet, "last_write_start", 0)
             _emit(
                 on_event,
                 kind="log",
                 message=(
                     f"{_sheet_label(sheet)}: sent {txn.transaction_id} "
-                    f"to tab {sheet.tab_title()}."
+                    f"to tab {sheet.tab_title()}"
+                    + (
+                        f" at row {start}"
+                        + (
+                            f" (withdrawals from row {WITHDRAW_FIRST_DATA_ROW})"
+                            if is_withdraw(txn.status)
+                            else ""
+                        )
+                        if start
+                        else ""
+                    )
+                    + "."
                 ),
             )
         #_blank_sheet_bank(sheet, on_event)
