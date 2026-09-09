@@ -265,6 +265,7 @@ class Settings:
     max_pages: int = 200
     poll_interval_seconds: int = 60
     use_open_browser: bool = True
+    use_dashboard_api: bool = True
     auth_state_path: Path = ROOT / "auth_state.json"
     database_path: Path = ROOT / "data" / "gathering.db"
     google_sheet_id_2: str = ""
@@ -340,6 +341,7 @@ class Settings:
             max_pages=_int("MAX_PAGES", 200),
             poll_interval_seconds=_int("POLL_INTERVAL_SECONDS", 60),
             use_open_browser=_bool("USE_OPEN_BROWSER", False),
+            use_dashboard_api=_bool("USE_DASHBOARD_API", True),
         )
 
     def require_dashboard(self) -> None:

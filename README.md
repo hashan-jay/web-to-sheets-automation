@@ -15,7 +15,7 @@ Copies deposit transactions from the admin dashboard into the Google Sheet, one 
 4. Share the Google Sheet with the service account email as **Editor**.
 5. Set `GOOGLE_SHEET_ID` in `.env` (the long ID in the spreadsheet URL).
 
-If the site uses 2FA, set `MANUAL_LOGIN_SECONDS=90` and complete the prompt in the opened browser on the first run. The login session is saved to `auth_state.json`.
+If the site uses 2FA, set `MANUAL_LOGIN_SECONDS=90` and complete the prompt in the opened browser on the first run. The login session is saved to `auth_state.json`. Later runs reuse that session and read the Completed list over HTTP, so they do not launch a second Chrome unless the login has expired.
 
 ## Run the GUI
 

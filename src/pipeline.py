@@ -109,8 +109,9 @@ def gather_from_dashboard(
             on_event,
             kind="log",
             message=(
-                "A browser window will open. If you see the login page, type the "
-                "current 6-digit Google Authenticator code into 2FA Passcode and click LOGIN."
+                "If the saved login has expired, a browser window may open. "
+                "Type the current 6-digit Google Authenticator code into 2FA Passcode "
+                "and click LOGIN."
             ),
         )
     capture = scrape_transactions(settings, limit=limit, on_event=on_event, once=once)
@@ -139,7 +140,7 @@ def gather_from_dashboard(
             ),
         )
     for txn in transactions:
-        _emit(on_event, **txn_row_event(txn, "Gathered", "Read from #transactions-list"))
+        _emit(on_event, **txn_row_event(txn, "Gathered", "Read from dashboard"))
     branded = [txn.brand for txn in transactions if (txn.brand or "").strip()]
     missing_brand = result.scraped - len(branded)
     if branded:

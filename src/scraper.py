@@ -4,7 +4,6 @@ import re
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from playwright.sync_api import (
     BrowserContext,
@@ -13,7 +12,12 @@ from playwright.sync_api import (
     sync_playwright,
 )
 
-from src.config import ROOT, Settings
+from src.config import Settings
+from src.dashboard_api import (
+    dashboard_origin,
+    scrape_via_http,
+    scrape_via_playwright_request,
+)
 from src.errors import ConfigError
 from src.live_page import persist_dashboard_url, scrape_open_browser
 from src.mapper import captured_brand
@@ -384,6 +388,24 @@ DATE_TOOL_JS = r"""
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
+_LIGHT_ARGS = [
+    "--disable-blink-features=AutomationControlled",
+    "--disable-extensions",
+    "--disable-dev-shm-usage",
+    "--disable-background-networking",
+    "--disable-default-apps",
+    "--disable-sync",
+    "--no-first-run",
+    "--mute-audio",
+]
+_BLOCKED_RESOURCE_TYPES = {"image", "media", "font"}
+_BLOCKED_URL_PARTS = (
+    "google-analytics",
+    "googletagmanager",
+    "doubleclick",
+    "facebook.net",
+    "hotjar",
 )
 
 EXTRACT_CARDS_JS = r"""
@@ -1006,6 +1028,71 @@ class ScrapeCapture:
     filter_status: str = COMPLETED_STATUS
 
 
+def _stamp_tally_date(rows: list[Transaction], day: str) -> list[Transaction]:
+    for txn in rows:
+        extras = dict(txn.extras or {})
+        extras["tally_date"] = day
+        txn.extras = extras
+    return rows
+
+
+def _capture_from_api(api, day: str, limit: int | None) -> ScrapeCapture | None:
+    if api is None:
+        return None
+    rows = _stamp_tally_date(list(api.transactions), day)
+    if limit:
+        rows = rows[:limit]
+    return ScrapeCapture(
+        transactions=rows,
+        website_records=int(api.website_records or 0),
+        website_total=str(api.website_total or ""),
+        filter_date=day,
+        filter_status=COMPLETED_STATUS,
+    )
+
+
+def _block_heavy_resources(route) -> None:
+    request = route.request
+    url = (request.url or "").lower()
+    if request.resource_type in _BLOCKED_RESOURCE_TYPES:
+        route.abort()
+        return
+    if any(part in url for part in _BLOCKED_URL_PARTS):
+        route.abort()
+        return
+    route.continue_()
+
+
+def _read_admin_token(page: Page) -> str:
+    try:
+        raw = page.evaluate(
+            """() => {
+              try {
+                const admin = JSON.parse(localStorage.getItem('ADMIN') || '{}') || {};
+                return String(admin.token || '');
+              } catch (err) {
+                return '';
+              }
+            }"""
+        )
+    except Exception:
+        return ""
+    return str(raw or "").strip()
+
+
+def _try_api_from_context(context: BrowserContext, page: Page, settings: Settings, limit, on_event):
+    origin = dashboard_origin(settings.dashboard_url or page.url)
+    token = _read_admin_token(page)
+    return scrape_via_playwright_request(
+        context.request,
+        origin,
+        token,
+        settings,
+        limit=limit,
+        on_event=on_event,
+    )
+
+
 def scrape_transactions(
     settings: Settings,
     limit: int | None = None,
@@ -1033,11 +1120,7 @@ def scrape_transactions(
             capture.website_total = str(summary["total"] or "")
         if collected:
             rows = list(collected.values())
-            for txn in rows:
-                extras = dict(txn.extras or {})
-                extras["tally_date"] = day
-                txn.extras = extras
-            capture.transactions = rows[:limit] if limit else rows
+            capture.transactions = _stamp_tally_date(rows[:limit] if limit else rows, day)
             return capture
 
     if not settings.dashboard_url:
@@ -1046,42 +1129,57 @@ def scrape_transactions(
             "or paste DASHBOARD_URL in .env."
         )
 
+    if settings.use_dashboard_api:
+        if on_event:
+            on_event(
+                {
+                    "kind": "log",
+                    "message": (
+                        "Trying the dashboard list over HTTP with the saved login "
+                        "(no extra Chrome if the session is still valid)."
+                    ),
+                }
+            )
+        api_capture = _capture_from_api(
+            scrape_via_http(settings, limit=limit, on_event=on_event),
+            day,
+            limit,
+        )
+        if api_capture is not None:
+            if on_event:
+                on_event(
+                    {
+                        "kind": "log",
+                        "message": (
+                            f"Read Completed over HTTP · Record: "
+                            f"{api_capture.website_records or '?'} · "
+                            f"{len(api_capture.transactions)} unique row(s)."
+                        ),
+                    }
+                )
+            return api_capture
+
     with sync_playwright() as playwright:
-        launch_args = ["--disable-blink-features=AutomationControlled"]
-        chrome = Path("C:/Program Files/Google/Chrome/Application/chrome.exe")
         launch_kwargs: dict = {
             "headless": not settings.headed,
             "slow_mo": settings.slow_mo_ms or 0,
-            "args": launch_args,
+            "args": list(_LIGHT_ARGS),
         }
-        if chrome.exists():
-            launch_kwargs["executable_path"] = str(chrome)
-        profile = ROOT / ".playwright-profile"
-        profile.mkdir(exist_ok=True)
+        if not settings.headed:
+            launch_kwargs["args"] = [*_LIGHT_ARGS, "--disable-gpu"]
         context_kwargs = {
-            "viewport": {"width": 1440, "height": 1100},
+            "viewport": {"width": 1280, "height": 900},
             "user_agent": _USER_AGENT,
             "locale": "en-AU",
             "timezone_id": "Australia/Melbourne",
         }
+        if settings.auth_state_path.exists():
+            context_kwargs["storage_state"] = str(settings.auth_state_path)
+        browser = playwright.chromium.launch(**launch_kwargs)
+        context = browser.new_context(**context_kwargs)
+        page = context.new_page()
         try:
-            context = playwright.chromium.launch_persistent_context(
-                str(profile),
-                **launch_kwargs,
-                **context_kwargs,
-            )
-            page = context.pages[0] if context.pages else context.new_page()
-            owns_browser = False
-        except Exception:
-            browser = playwright.chromium.launch(**launch_kwargs)
-            if settings.auth_state_path.exists():
-                context_kwargs["storage_state"] = str(settings.auth_state_path)
-            context = browser.new_context(**context_kwargs)
-            page = context.new_page()
-            owns_browser = True
-        else:
-            browser = None
-        try:
+            page.route("**/*", _block_heavy_resources)
             if settings.headed:
                 page.bring_to_front()
             page.goto(settings.dashboard_url, wait_until="domcontentloaded")
@@ -1090,6 +1188,26 @@ def scrape_transactions(
             if not _on_transactions_page(page):
                 _login_if_needed(page, settings)
             _wait_for_dashboard(page, settings)
+            if _on_transactions_page(page):
+                context.storage_state(path=str(settings.auth_state_path))
+            if settings.use_dashboard_api:
+                api_capture = _capture_from_api(
+                    _try_api_from_context(context, page, settings, limit, on_event),
+                    day,
+                    limit,
+                )
+                if api_capture is not None:
+                    if on_event:
+                        on_event(
+                            {
+                                "kind": "log",
+                                "message": (
+                                    "Login reused; Completed list read over HTTP "
+                                    "instead of clicking pages."
+                                ),
+                            }
+                        )
+                    return api_capture
             _apply_filters(page, settings, on_event=on_event)
             summary = _page_summary(page)
             capture.website_records = int(summary.get("records") or 0)
@@ -1174,14 +1292,9 @@ def scrape_transactions(
                 context.storage_state(path=str(settings.auth_state_path))
         finally:
             context.close()
-            if owns_browser and browser is not None:
-                browser.close()
+            browser.close()
 
-    rows = list(collected.values())
-    for txn in rows:
-        extras = dict(txn.extras or {})
-        extras["tally_date"] = day
-        txn.extras = extras
+    rows = _stamp_tally_date(list(collected.values()), day)
     capture.transactions = rows[:limit] if limit else rows
     return capture
 

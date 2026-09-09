@@ -189,6 +189,15 @@ from src.pipeline import (
     txn_row_event,
 )
 from src.tally import COMPLETED_STATUS, format_amount, local_today, parse_amount, txn_kind
+from src.workspace import (
+    apply_workspace_to_settings,
+    load_workspace_state,
+    migrate_legacy_workspace,
+    save_workspace_state,
+    seed_workspace_sheets,
+    website_host,
+    workspace_key,
+)
 
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(1)
@@ -203,7 +212,7 @@ class FinanceAutomationApp:
         self.root.geometry("1560x980")
         self.root.minsize(1100, 760)
         self.settings = Settings.load()
-        self.db = GatheringDB(self.settings.database_path)
+        self.workspace_key = ""
         self.events: queue.Queue[dict] = queue.Queue()
         self.worker: threading.Thread | None = None
         self.watcher = None
@@ -242,6 +251,7 @@ class FinanceAutomationApp:
         self.date_filter = tk.StringVar(value=local_today())
         self.filter_caption = tk.StringVar(value="Showing today's Completed records")
         self.match_caption = tk.StringVar(value="Website Completed count appears here after Run now.")
+        self.workspace_caption = tk.StringVar(value="No website selected — records start empty.")
         self.website_records = 0
         self.website_total = ""
         self.website_date = ""
@@ -262,6 +272,7 @@ class FinanceAutomationApp:
         ]
         self.google_sheet = self.google_sheet_vars[0]
         self.google_sheet_2 = self.google_sheet_vars[1]
+        self.db = GatheringDB(self.settings.database_path)
         self.dark_mode = tk.BooleanVar(value=load_gui_theme() == "dark")
         self.auto_running = False
         self.auto_send_to_sheet = tk.BooleanVar(value=False)
@@ -282,6 +293,7 @@ class FinanceAutomationApp:
         self.deposit_tally = tk.StringVar(value="")
         self.withdraw_tally = tk.StringVar(value="")
         self.sent_tally = tk.StringVar(value="")
+        self._open_workspace(self._current_workspace_key(), initial=True)
 
         self._build_style()
         self._build_layout()
@@ -294,6 +306,12 @@ class FinanceAutomationApp:
             "Send and Sync write each date to the Google Sheet tab with that day number "
             "(29th transactions go to tab 29)."
         )
+        label = self._workspace_label(self.workspace_key)
+        if label:
+            self._append_log(
+                f"Loaded saved records for {label} only. Click another account "
+                "or enter a new website to switch."
+            )
         self._bind_shortcuts()
         self.root.after(120, self._drain_events)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -660,9 +678,13 @@ class FinanceAutomationApp:
         ttk.Label(sidebar, textvariable=self.status_text, style="Muted.TLabel").pack(anchor="w", pady=(2, 8))
 
         ttk.Label(sidebar, text="Website", style="Muted.TLabel").pack(anchor="w")
-        ttk.Entry(sidebar, textvariable=self.login_website, width=28).pack(fill="x", pady=(2, 6))
+        website_entry = ttk.Entry(sidebar, textvariable=self.login_website, width=28)
+        website_entry.pack(fill="x", pady=(2, 6))
+        website_entry.bind("<FocusOut>", self._on_login_identity_changed)
         ttk.Label(sidebar, text="Username", style="Muted.TLabel").pack(anchor="w")
-        ttk.Entry(sidebar, textvariable=self.login_username, width=28).pack(fill="x", pady=(2, 6))
+        username_entry = ttk.Entry(sidebar, textvariable=self.login_username, width=28)
+        username_entry.pack(fill="x", pady=(2, 6))
+        username_entry.bind("<FocusOut>", self._on_login_identity_changed)
         ttk.Label(sidebar, text="Password", style="Muted.TLabel").pack(anchor="w")
         ttk.Entry(sidebar, textvariable=self.login_password, width=28).pack(fill="x", pady=(2, 6))
         ttk.Label(sidebar, text="2FA code", style="Muted.TLabel").pack(anchor="w")
@@ -671,7 +693,7 @@ class FinanceAutomationApp:
         ttk.Label(sidebar, text="Saved accounts (3)", style="CardTitle.TLabel").pack(anchor="w")
         ttk.Label(
             sidebar,
-            text="Each account stores website, username, password, and 2FA. Click an account, then Run now.",
+            text="Each account stores website, username, password, 2FA, and that site's Google Sheets. Click an account to show only that website's Latest scrape, Deposits, Withdrawals, and sent rows. A new website starts empty.",
             style="Muted.TLabel",
             wraplength=280,
         ).pack(anchor="w", pady=(2, 6))
@@ -769,7 +791,7 @@ class FinanceAutomationApp:
         ttk.Label(sidebar, text="Google Sheets", style="CardTitle.TLabel").pack(anchor="w", pady=(4, 6))
         ttk.Label(
             sidebar,
-            text="Paste a spreadsheet URL or ID. Share each sheet with the service account as Editor. Send writes the same rows to every filled sheet.",
+            text="These sheets belong to the current website only. Switching accounts loads that website's sheets. Share each sheet with the service account as Editor.",
             style="Muted.TLabel",
             wraplength=280,
         ).pack(anchor="w", pady=(0, 6))
@@ -870,6 +892,9 @@ class FinanceAutomationApp:
         ttk.Label(filter_card, text="Tally date  ·  Completed only", style="CardTitle.TLabel").grid(
             row=0, column=0, sticky="w"
         )
+        ttk.Label(filter_card, textvariable=self.workspace_caption, style="Tally.TLabel").grid(
+            row=1, column=0, columnspan=2, sticky="w", pady=(4, 0)
+        )
         filter_box = ttk.Frame(filter_card, style="Card.TFrame")
         filter_box.grid(row=0, column=1, sticky="e")
         ttk.Label(filter_box, text="Date", style="Muted.TLabel").pack(side="left")
@@ -884,13 +909,13 @@ class FinanceAutomationApp:
         self.date_combo.bind("<<ComboboxSelected>>", self._on_filters_changed)
         ttk.Button(filter_box, text="Today", command=self._select_today).pack(side="left")
         ttk.Label(filter_card, textvariable=self.filter_caption, style="Muted.TLabel").grid(
-            row=1, column=0, columnspan=2, sticky="w", pady=(6, 0)
+            row=2, column=0, columnspan=2, sticky="w", pady=(6, 0)
         )
         ttk.Label(filter_card, textvariable=self.match_caption, style="Tally.TLabel").grid(
-            row=2, column=0, columnspan=2, sticky="w", pady=(4, 0)
+            row=3, column=0, columnspan=2, sticky="w", pady=(4, 0)
         )
         quick = ttk.Frame(filter_card, style="Card.TFrame")
-        quick.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        quick.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         ttk.Button(quick, text="Deposits", style="Quick.TButton", command=lambda: self._show_tab(1)).pack(
             side="left", padx=(0, 6)
         )
@@ -1208,9 +1233,139 @@ class FinanceAutomationApp:
         return self.worker is not None and self.worker.is_alive()
 
     def _account_host(self, website: str) -> str:
-        url = normalize_dashboard_url(website)
-        host = url.split("://", 1)[-1].split("/", 1)[0].split("#", 1)[0]
-        return host or ""
+        return website_host(website)
+
+    def _current_workspace_key(self) -> str:
+        return workspace_key(self.login_website.get(), self.login_username.get())
+
+    def _workspace_label(self, key: str = "") -> str:
+        host = self._account_host(self.login_website.get())
+        username = self.login_username.get().strip()
+        if host and username:
+            return f"{host} · {username}"
+        if host:
+            return host
+        if username:
+            return username
+        if key:
+            return key.replace("__", " · ").replace("_", ".")
+        return ""
+
+    def _apply_sheet_ids_to_fields(self, sheet_ids: list[str]) -> None:
+        padded = list(sheet_ids) + [""] * len(self.google_sheet_vars)
+        for index, var in enumerate(self.google_sheet_vars):
+            sheet_id = normalize_google_sheet_id(padded[index])
+            var.set(google_sheet_url(sheet_id) or sheet_id)
+
+    def _sheet_ids_from_fields(self) -> list[str]:
+        return [self._sheet_id_from_field(slot) for slot in GOOGLE_SHEET_SLOTS]
+
+    def _save_current_workspace_state(self, *, sheets_only: bool = False) -> None:
+        if not self.workspace_key:
+            return
+        if sheets_only:
+            save_workspace_state(
+                self.workspace_key,
+                sheet_ids=self._sheet_ids_from_fields(),
+            )
+            return
+        save_workspace_state(
+            self.workspace_key,
+            website=self.login_website.get(),
+            username=self.login_username.get(),
+            sheet_ids=self._sheet_ids_from_fields(),
+        )
+
+    def _reset_workspace_view(self) -> None:
+        self.latest_run_ids = set()
+        self.sheet_id_cache = set()
+        self.sheet_id_cache_date = ""
+        self.website_records = 0
+        self.website_total = ""
+        self.website_date = ""
+        self.sheet_date_count = 0
+        self.sheet_tally_date = ""
+        if hasattr(self, "latest_tree"):
+            self._clear_bucket("latest")
+            self._clear_bucket("deposit")
+            self._clear_bucket("withdraw")
+            self._clear_bucket("sent")
+
+    def _update_workspace_caption(self) -> None:
+        label = self._workspace_label(self.workspace_key)
+        if label:
+            self.workspace_caption.set(f"Showing records for {label} only")
+        else:
+            self.workspace_caption.set("No website selected — records start empty.")
+
+    def _open_workspace(self, key: str, initial: bool = False) -> bool:
+        previous = self.workspace_key
+        if not initial and key == previous:
+            self._update_workspace_caption()
+            return False
+        if not initial:
+            self._save_current_workspace_state(sheets_only=True)
+        migrated = migrate_legacy_workspace(key) if key else False
+        if key:
+            seed_workspace_sheets(
+                key,
+                [self.settings.sheet_id_at(slot) for slot in GOOGLE_SHEET_SLOTS]
+                if initial or migrated
+                else self._sheet_ids_from_fields() if not previous else [],
+            )
+        self.workspace_key = key
+        apply_workspace_to_settings(self.settings, key)
+        self.db = GatheringDB(self.settings.database_path)
+        state = load_workspace_state(key)
+        if key and (any(state["sheet_ids"]) or not initial):
+            self._apply_sheet_ids_to_fields(state["sheet_ids"])
+        self._persist_google_sheets(remember_workspace=False)
+        self._reset_workspace_view()
+        self._update_workspace_caption()
+        return True
+
+    def _switch_workspace_if_needed(self, log: bool = True) -> bool:
+        key = self._current_workspace_key()
+        if key == self.workspace_key:
+            self._update_workspace_caption()
+            return True
+        if self._busy() or self.auto_running:
+            messagebox.showinfo(
+                "Finish the current run first",
+                "Stop Automated Run or wait for the current scrape/send to finish "
+                "before changing website or account.",
+            )
+            state = load_workspace_state(self.workspace_key)
+            if state["website"] or state["username"]:
+                if state["website"]:
+                    self.login_website.set(state["website"])
+                if state["username"]:
+                    self.login_username.set(state["username"])
+            return False
+        changed = self._open_workspace(key)
+        if changed and hasattr(self, "latest_tree"):
+            self._reload_workspace()
+            self._refresh_counts()
+            self._queue_sheet_unsent_check()
+        if changed and log:
+            label = self._workspace_label(key)
+            if label:
+                self._append_log(
+                    f"Switched to {label}. Latest scrape, Deposits, Withdrawals, "
+                    "and Google Sheet sent now show only this website."
+                )
+            else:
+                self._append_log(
+                    "No website selected. Transaction lists are empty until you "
+                    "enter a website or click a saved account."
+                )
+        return True
+
+    def _on_login_identity_changed(self, _event=None) -> None:
+        website = normalize_dashboard_url(self.login_website.get())
+        if website:
+            self.login_website.set(website)
+        self._switch_workspace_if_needed()
 
     def _account_button_text(self, slot: int) -> str:
         account = self.login_accounts[slot - 1]
@@ -1233,6 +1388,16 @@ class FinanceAutomationApp:
         for slot, button in enumerate(self.account_use_btns, start=1):
             button.configure(text=self._account_button_text(slot))
 
+    def _workspace_change_blocked(self) -> bool:
+        if not (self._busy() or self.auto_running):
+            return False
+        messagebox.showinfo(
+            "Finish the current run first",
+            "Stop Automated Run or wait for the current scrape/send to finish "
+            "before changing website or account.",
+        )
+        return True
+
     def _select_account(self, slot: int) -> None:
         account = self.login_accounts[slot - 1]
         if not account["username"] and not account["password"] and not account.get("website"):
@@ -1240,6 +1405,9 @@ class FinanceAutomationApp:
                 f"Account {slot} is empty",
                 "Enter website, username, password, and 2FA above, then click Save on this account.",
             )
+            return
+        next_key = workspace_key(account.get("website", ""), account["username"])
+        if next_key != self.workspace_key and self._workspace_change_blocked():
             return
         self.active_account.set(slot)
         self.login_website.set(account.get("website", ""))
@@ -1257,11 +1425,13 @@ class FinanceAutomationApp:
             account["twofa"],
         )
         self._refresh_account_buttons()
+        if not self._switch_workspace_if_needed(log=False):
+            return
         host = self._account_host(account.get("website", ""))
         self._append_log(
             f"Using saved Account {slot} ({account['username'] or 'no username'}"
             + (f" on {host}" if host else "")
-            + ")."
+            + "). Showing only this website's transactions and Google Sheets."
         )
 
     def _save_account(self, slot: int) -> None:
@@ -1286,8 +1456,11 @@ class FinanceAutomationApp:
         self.saved_password = password
         self.saved_2fa = twofa
         self._refresh_account_buttons()
+        self._switch_workspace_if_needed(log=False)
+        self._save_current_workspace_state()
         self._append_log(
-            f"Saved current login fields to Account {slot} ({username} on {self._account_host(website)})."
+            f"Saved current login fields and this website's records/sheets to "
+            f"Account {slot} ({username} on {self._account_host(website)})."
         )
 
     def _clear_account(self, slot: int) -> None:
@@ -1310,6 +1483,8 @@ class FinanceAutomationApp:
             self.saved_password = ""
             self.saved_2fa = ""
         self._refresh_account_buttons()
+        if self.active_account.get() == slot:
+            self._switch_workspace_if_needed(log=False)
         self._append_log(f"Cleared saved Account {slot}. The other accounts were left as they are.")
 
     def _persist_login_fields(self) -> None:
@@ -1415,7 +1590,7 @@ class FinanceAutomationApp:
         index = max(1, min(int(which or 1), len(self.google_sheet_vars))) - 1
         return normalize_google_sheet_id(self.google_sheet_vars[index].get())
 
-    def _persist_google_sheets(self) -> list[str]:
+    def _persist_google_sheets(self, remember_workspace: bool = True) -> list[str]:
         ids = [self._sheet_id_from_field(slot) for slot in GOOGLE_SHEET_SLOTS]
         persist_env_values(
             {google_sheet_env_key(slot): ids[slot - 1] for slot in GOOGLE_SHEET_SLOTS}
@@ -1423,6 +1598,9 @@ class FinanceAutomationApp:
         for slot, sheet_id in enumerate(ids, start=1):
             self.google_sheet_vars[slot - 1].set(google_sheet_url(sheet_id) or sheet_id)
         self.settings = Settings.load()
+        apply_workspace_to_settings(self.settings, self.workspace_key)
+        if remember_workspace:
+            self._save_current_workspace_state()
         return ids
 
     def _save_google_sheets(self) -> None:
@@ -1430,13 +1608,16 @@ class FinanceAutomationApp:
         if not ids[0]:
             messagebox.showwarning(
                 "Google Sheet required",
-                "Paste the Google Sheet URL or ID into Sheet 1.",
+                "Paste the Google Sheet URL or ID into Sheet 1 for this website.",
             )
             return
         filled = [index for index, sheet_id in enumerate(ids, start=1) if sheet_id]
         labels = ", ".join(f"Sheet {index}" for index in filled)
+        label = self._workspace_label(self.workspace_key)
         self._append_log(
-            f"Saved {labels}. Send will copy the same rows to each filled sheet."
+            f"Saved {labels}"
+            + (f" for {label}" if label else "")
+            + ". Send will copy the same rows to each filled sheet for this website only."
         )
 
     def _open_google_sheet(self, which: int = 1) -> None:
@@ -1466,8 +1647,8 @@ class FinanceAutomationApp:
         settings.filter_status = COMPLETED_STATUS
         for slot in GOOGLE_SHEET_SLOTS:
             sheet_id = self._sheet_id_from_field(slot)
-            if sheet_id:
-                settings.set_sheet_id_at(slot, sheet_id)
+            settings.set_sheet_id_at(slot, sheet_id)
+        apply_workspace_to_settings(settings, self._current_workspace_key() or self.workspace_key)
         return settings
 
     def _scrape_ready(self, action: str) -> bool:
@@ -1551,6 +1732,8 @@ class FinanceAutomationApp:
                 return
             write_sheet = True
         self._persist_login_fields()
+        if not self._switch_workspace_if_needed():
+            return
         self.poll_interval.set(self._auto_interval_seconds())
         self._single_run_active = False
         self.auto_running = True
@@ -1799,6 +1982,8 @@ class FinanceAutomationApp:
         if not self._scrape_ready("Run now"):
             return
         self._persist_login_fields()
+        if not self._switch_workspace_if_needed():
+            return
         self._clear_bucket("latest")
         self.latest_run_ids = set()
         self.capturing_latest = True
@@ -1956,8 +2141,8 @@ class FinanceAutomationApp:
         else:
             sheet_note = "The sheet is not updated yet."
         self._append_log(
-            f"Opening {settings.dashboard_url} as {settings.dashboard_username} "
-            f"and gathering Completed transactions for {settings.filter_date_from}. "
+            f"Gathering Completed transactions for {settings.filter_date_from} "
+            f"from {settings.dashboard_url} as {settings.dashboard_username}. "
             f"{sheet_note}"
         )
         if settings.dashboard_2fa:
@@ -2572,6 +2757,7 @@ class FinanceAutomationApp:
         self.auto_running = False
         self._cancel_auto_timer()
         self._stop_watcher()
+        self._save_current_workspace_state()
         self.root.destroy()
 
 
