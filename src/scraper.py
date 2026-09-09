@@ -15,7 +15,6 @@ from playwright.sync_api import (
 from src.config import Settings
 from src.dashboard_api import (
     dashboard_origin,
-    scrape_via_http,
     scrape_via_playwright_request,
 )
 from src.errors import ConfigError
@@ -398,6 +397,11 @@ _LIGHT_ARGS = [
     "--disable-sync",
     "--no-first-run",
     "--mute-audio",
+    "--disable-gpu",
+    "--disable-software-rasterizer",
+    "--disable-features=TranslateUI,BackForwardCache,AcceptCHFrame,MediaRouter,InterestFeedContentSuggestions",
+    "--renderer-process-limit=2",
+    "--js-flags=--max-old-space-size=256",
 ]
 _BLOCKED_RESOURCE_TYPES = {"image", "media", "font"}
 _BLOCKED_URL_PARTS = (
@@ -611,7 +615,7 @@ def _wait_for_app_ready(page: Page) -> None:
         ).first.wait_for(timeout=25000)
     except PlaywrightTimeout:
         pass
-    page.wait_for_timeout(600)
+    page.wait_for_timeout(200)
 
 
 def _goto_transactions(page: Page, settings: Settings) -> None:
@@ -850,6 +854,17 @@ def _apply_filters(page: Page, settings: Settings, on_event=None) -> None:
     except Exception:
         pass
     _select_filter_dates(page, day, end, on_event=on_event)
+    if on_event:
+        on_event(
+            {
+                "kind": "log",
+                "message": (
+                    f"Website filters set to Status {status} · date {day}"
+                    + (f" to {end}" if end and end != day else "")
+                    + ". Searching every Completed page."
+                ),
+            }
+        )
     _click_search(page)
     try:
         page.locator("#transactions-list tr[data-id]").first.wait_for(timeout=20000)
@@ -1052,15 +1067,48 @@ def _capture_from_api(api, day: str, limit: int | None) -> ScrapeCapture | None:
 
 
 def _block_heavy_resources(route) -> None:
-    request = route.request
-    url = (request.url or "").lower()
-    if request.resource_type in _BLOCKED_RESOURCE_TYPES:
-        route.abort()
+    try:
+        request = route.request
+        url = (request.url or "").lower()
+        if request.resource_type in _BLOCKED_RESOURCE_TYPES:
+            route.abort()
+            return
+        if any(part in url for part in _BLOCKED_URL_PARTS):
+            route.abort()
+            return
+        route.continue_()
+    except Exception:
+        try:
+            route.continue_()
+        except Exception:
+            try:
+                route.abort()
+            except Exception:
+                pass
+
+
+LOADING_IDLE_JS = """() => !window.jQuery || jQuery.active === 0"""
+
+HIDE_LOADING_JS = """() => {
+  document.querySelectorAll(".blockUI, .pace-active, .loading-overlay").forEach((el) => {
+    el.style.display = "none";
+  });
+  if (window.jQuery) {
+    try { jQuery(".blockUI").hide(); } catch (err) {}
+  }
+}"""
+
+
+def _wait_for_loading_idle(page: Page) -> None:
+    try:
+        page.wait_for_function(LOADING_IDLE_JS, timeout=4000)
         return
-    if any(part in url for part in _BLOCKED_URL_PARTS):
-        route.abort()
-        return
-    route.continue_()
+    except Exception:
+        pass
+    try:
+        page.evaluate(HIDE_LOADING_JS)
+    except Exception:
+        pass
 
 
 def _read_admin_token(page: Page) -> str:
@@ -1093,11 +1141,104 @@ def _try_api_from_context(context: BrowserContext, page: Page, settings: Setting
     )
 
 
+def launch_dashboard_page(playwright, settings: Settings, block_heavy: bool = True):
+    launch_kwargs: dict = {
+        "headless": not settings.headed,
+        "slow_mo": settings.slow_mo_ms or 0,
+        "args": list(_LIGHT_ARGS),
+    }
+    context_kwargs = {
+        "viewport": {"width": 1100, "height": 720},
+        "user_agent": _USER_AGENT,
+        "locale": "en-AU",
+        "timezone_id": "Australia/Melbourne",
+    }
+    if settings.auth_state_path.exists():
+        context_kwargs["storage_state"] = str(settings.auth_state_path)
+    browser = playwright.chromium.launch(**launch_kwargs)
+    context = browser.new_context(**context_kwargs)
+    page = context.new_page()
+    if block_heavy:
+        page.route("**/*", _block_heavy_resources)
+    if settings.headed:
+        page.bring_to_front()
+    page.goto(settings.dashboard_url, wait_until="domcontentloaded")
+    _wait_for_app_ready(page)
+    _dismiss_modals(page)
+    if not _on_transactions_page(page):
+        _login_if_needed(page, settings)
+    _wait_for_dashboard(page, settings)
+    _wait_for_loading_idle(page)
+    if _on_transactions_page(page):
+        context.storage_state(path=str(settings.auth_state_path))
+    return browser, context, page
+
+
+class DashboardSession:
+    """Keep one slim Chromium open so Automated Run does not relaunch Chrome every tick."""
+
+    def __init__(self) -> None:
+        self._playwright = None
+        self.browser = None
+        self.context = None
+        self.page = None
+        self._key = ""
+
+    def start(self, settings: Settings):
+        from playwright.sync_api import sync_playwright
+
+        key = (
+            f"{settings.dashboard_url.strip()}|{settings.dashboard_username.strip()}|"
+            f"{int(bool(settings.headed))}"
+        )
+        if self.page is not None and key != self._key:
+            self._reset_browser()
+        if self.page is not None:
+            try:
+                if not self.page.is_closed():
+                    if not _on_transactions_page(self.page):
+                        _login_if_needed(self.page, settings)
+                        _wait_for_dashboard(self.page, settings)
+                    return self.browser, self.context, self.page
+            except Exception:
+                self._reset_browser()
+        if self._playwright is None:
+            self._playwright = sync_playwright().start()
+        self.browser, self.context, self.page = launch_dashboard_page(
+            self._playwright, settings, block_heavy=True
+        )
+        self._key = key
+        return self.browser, self.context, self.page
+
+    def _reset_browser(self) -> None:
+        for closer in (self.context, self.browser):
+            if closer is None:
+                continue
+            try:
+                closer.close()
+            except Exception:
+                pass
+        self.page = None
+        self.context = None
+        self.browser = None
+        self._key = ""
+
+    def close(self) -> None:
+        self._reset_browser()
+        if self._playwright is not None:
+            try:
+                self._playwright.stop()
+            except Exception:
+                pass
+            self._playwright = None
+
+
 def scrape_transactions(
     settings: Settings,
     limit: int | None = None,
     on_event=None,
     once: bool = False,
+    session: DashboardSession | None = None,
 ) -> ScrapeCapture:
     settings.require_dashboard()
     settings.filter_status = COMPLETED_STATUS
@@ -1129,85 +1270,8 @@ def scrape_transactions(
             "or paste DASHBOARD_URL in .env."
         )
 
-    if settings.use_dashboard_api:
-        if on_event:
-            on_event(
-                {
-                    "kind": "log",
-                    "message": (
-                        "Trying the dashboard list over HTTP with the saved login "
-                        "(no extra Chrome if the session is still valid)."
-                    ),
-                }
-            )
-        api_capture = _capture_from_api(
-            scrape_via_http(settings, limit=limit, on_event=on_event),
-            day,
-            limit,
-        )
-        if api_capture is not None:
-            if on_event:
-                on_event(
-                    {
-                        "kind": "log",
-                        "message": (
-                            f"Read Completed over HTTP · Record: "
-                            f"{api_capture.website_records or '?'} · "
-                            f"{len(api_capture.transactions)} unique row(s)."
-                        ),
-                    }
-                )
-            return api_capture
-
-    with sync_playwright() as playwright:
-        launch_kwargs: dict = {
-            "headless": not settings.headed,
-            "slow_mo": settings.slow_mo_ms or 0,
-            "args": list(_LIGHT_ARGS),
-        }
-        if not settings.headed:
-            launch_kwargs["args"] = [*_LIGHT_ARGS, "--disable-gpu"]
-        context_kwargs = {
-            "viewport": {"width": 1280, "height": 900},
-            "user_agent": _USER_AGENT,
-            "locale": "en-AU",
-            "timezone_id": "Australia/Melbourne",
-        }
-        if settings.auth_state_path.exists():
-            context_kwargs["storage_state"] = str(settings.auth_state_path)
-        browser = playwright.chromium.launch(**launch_kwargs)
-        context = browser.new_context(**context_kwargs)
-        page = context.new_page()
+    def _scrape_with(browser, context, page, close_browser: bool) -> None:
         try:
-            page.route("**/*", _block_heavy_resources)
-            if settings.headed:
-                page.bring_to_front()
-            page.goto(settings.dashboard_url, wait_until="domcontentloaded")
-            _wait_for_app_ready(page)
-            _dismiss_modals(page)
-            if not _on_transactions_page(page):
-                _login_if_needed(page, settings)
-            _wait_for_dashboard(page, settings)
-            if _on_transactions_page(page):
-                context.storage_state(path=str(settings.auth_state_path))
-            if settings.use_dashboard_api:
-                api_capture = _capture_from_api(
-                    _try_api_from_context(context, page, settings, limit, on_event),
-                    day,
-                    limit,
-                )
-                if api_capture is not None:
-                    if on_event:
-                        on_event(
-                            {
-                                "kind": "log",
-                                "message": (
-                                    "Login reused; Completed list read over HTTP "
-                                    "instead of clicking pages."
-                                ),
-                            }
-                        )
-                    return api_capture
             _apply_filters(page, settings, on_event=on_event)
             summary = _page_summary(page)
             capture.website_records = int(summary.get("records") or 0)
@@ -1291,8 +1355,23 @@ def scrape_transactions(
             if _on_transactions_page(page):
                 context.storage_state(path=str(settings.auth_state_path))
         finally:
-            context.close()
-            browser.close()
+            if close_browser:
+                try:
+                    context.close()
+                except Exception:
+                    pass
+                try:
+                    browser.close()
+                except Exception:
+                    pass
+
+    if session is not None:
+        browser, context, page = session.start(settings)
+        _scrape_with(browser, context, page, close_browser=False)
+    else:
+        with sync_playwright() as playwright:
+            browser, context, page = launch_dashboard_page(playwright, settings)
+            _scrape_with(browser, context, page, close_browser=True)
 
     rows = _stamp_tally_date(list(collected.values()), day)
     capture.transactions = rows[:limit] if limit else rows

@@ -8,6 +8,7 @@ from src.database import GatheringDB, _transaction_from_payload
 from src.mapper import (
     captured_brand,
     clean_name,
+    is_withdraw,
     sheet_game_choices,
     to_sheet_row,
     txn_local_date,
@@ -15,7 +16,7 @@ from src.mapper import (
 from src.models import Transaction
 from src.scraper import scrape_transactions
 from src.tally import COMPLETED_STATUS
-from src.sheets import SheetClient, new_rows_only
+from src.sheets import WITHDRAW_FIRST_DATA_ROW, SheetClient, new_rows_only
 
 EventFn = Callable[[dict], None]
 
@@ -101,6 +102,7 @@ def gather_from_dashboard(
     on_event: EventFn | None = None,
     limit: int | None = None,
     once: bool = False,
+    session=None,
 ) -> PipelineResult:
     result = PipelineResult()
     _emit(on_event, kind="log", message="Gathering transactions from the dashboard...")
@@ -114,7 +116,10 @@ def gather_from_dashboard(
                 "and click LOGIN."
             ),
         )
-    capture = scrape_transactions(settings, limit=limit, on_event=on_event, once=once)
+    known = db.known_ids()
+    capture = scrape_transactions(
+        settings, limit=limit, on_event=on_event, once=once, session=session
+    )
     transactions = capture.transactions
     result.scraped = len(transactions)
     result.website_records = capture.website_records
@@ -139,8 +144,16 @@ def gather_from_dashboard(
                 + f" · scraped {result.scraped} unique row(s) for {capture.filter_date}."
             ),
         )
-    for txn in transactions:
+    new_txns = [txn for txn in transactions if txn.transaction_id not in known]
+    for txn in new_txns:
         _emit(on_event, **txn_row_event(txn, "Gathered", "Read from dashboard"))
+    already = result.scraped - len(new_txns)
+    if already > 0:
+        _emit(
+            on_event,
+            kind="log",
+            message=f"{already} Completed ID(s) were already in the GUI; {len(new_txns)} new.",
+        )
     branded = [txn.brand for txn in transactions if (txn.brand or "").strip()]
     missing_brand = result.scraped - len(branded)
     if branded:
@@ -296,6 +309,7 @@ def run_pipeline(
     only_ids: set[str] | None = None,
     once: bool = False,
     one_by_one: bool = False,
+    session=None,
 ) -> PipelineResult:
     db = GatheringDB(settings.database_path)
     totals = PipelineResult()
@@ -306,7 +320,9 @@ def run_pipeline(
                 kind="log",
                 message="Reading the admin website already open in Chrome/Brave...",
             )
-        gathered = gather_from_dashboard(settings, db, on_event, limit=limit, once=once)
+        gathered = gather_from_dashboard(
+            settings, db, on_event, limit=limit, once=once, session=session
+        )
         totals.scraped = gathered.scraped
         totals.new_notifications = gathered.new_notifications
     if write_sheet:
@@ -558,6 +574,12 @@ def _write_day_rows(
             )
             try:
                 sheet.write_row(to_sheet_row(txn, settings, games=games))
+                start = getattr(sheet, "last_write_start", 0)
+                if start:
+                    detail = (
+                        f"Row appended to Google Sheet tab {sheet.tab_title()} "
+                        f"at row {start}"
+                    )
             except Exception as exc:
                 _emit(
                     on_event,
@@ -584,7 +606,8 @@ def _write_day_rows(
             )
         #_blank_sheet_bank(sheet, on_event)
         return
-    rows = [to_sheet_row(txn, settings, games=games) for txn in to_copy]
+    deposits = [txn for txn in to_copy if not is_withdraw(txn.status)]
+    withdraws = [txn for txn in to_copy if is_withdraw(txn.status)]
     for txn in to_copy:
         _emit(
             on_event,
@@ -594,35 +617,53 @@ def _write_day_rows(
                 _row_detail(txn, f"Writing row to {_sheet_label(sheet)} tab {sheet.tab_title()}"),
             ),
         )
+    written: list[Transaction] = []
+    skip_day = getattr(sheet, "_skip_day_column", False)
     try:
-        sheet.write_rows(rows)
-        start = getattr(sheet, "last_write_start", 0)
-        skip_day = getattr(sheet, "_skip_day_column", False)
-        _emit(
-            on_event,
-            kind="log",
-            message=(
-                f"{_sheet_label(sheet)}: wrote {len(to_copy)} row(s) "
-                f"on tab {sheet.tab_title()}"
-                + (f" starting at row {start}" if start else "")
-                + (
-                    " in B:L (skipped locked column A and rows 1–104)."
-                    if skip_day
-                    else "."
-                )
-            ),
-        )
+        for group, kind, withdraw_block in (
+            (deposits, "deposit", False),
+            (withdraws, "withdrawal", True),
+        ):
+            if not group:
+                continue
+            sheet.write_rows(
+                [to_sheet_row(txn, settings, games=games) for txn in group],
+                withdraw=withdraw_block,
+            )
+            written.extend(group)
+            start = getattr(sheet, "last_write_start", 0)
+            _emit(
+                on_event,
+                kind="log",
+                message=(
+                    f"{_sheet_label(sheet)}: wrote {len(group)} {kind} row(s) "
+                    f"on tab {sheet.tab_title()}"
+                    + (f" starting at row {start}" if start else "")
+                    + (
+                        f" (withdrawals from row {WITHDRAW_FIRST_DATA_ROW})."
+                        if withdraw_block
+                        else (
+                            " in B:L (skipped locked column A and rows 1–104)."
+                            if skip_day
+                            else "."
+                        )
+                    )
+                ),
+            )
     except Exception as exc:
         _emit(
             on_event,
             kind="log",
             message=f"{_sheet_label(sheet)}: write failed on tab {sheet.tab_title()}: {exc}",
         )
+        written_ids = {txn.transaction_id for txn in written}
         for txn in to_copy:
+            if txn.transaction_id in written_ids:
+                continue
             db.mark(txn.transaction_id, "failed", str(exc))
             result.failed += 1
             _emit(on_event, **txn_row_event(txn, "Failed", str(exc)))
-        return
+        to_copy = written
     for txn in to_copy:
         db.mark(txn.transaction_id, "copied", detail)
         result.copied += 1

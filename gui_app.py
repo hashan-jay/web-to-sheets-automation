@@ -11,6 +11,13 @@ from datetime import datetime
 from tkinter import messagebox, ttk
 
 DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
+EVENT_BATCH = 25
+GUI_ROW_LIMIT = 1200
+LOG_LINE_LIMIT = 400
+FILTER_BATCH = 80
+LIVE_TALLY_MS = 80
+PENDING_TALLY_STATUSES = frozenset({"Pending", "Gathered", "Preview", "Copying"})
+SENT_TALLY_STATUSES = frozenset({"Copied", "Skipped"})
 
 ALL_COLUMNS = (
     "time",
@@ -215,6 +222,9 @@ class FinanceAutomationApp:
         self.workspace_key = ""
         self.events: queue.Queue[dict] = queue.Queue()
         self.worker: threading.Thread | None = None
+        self._scrape_thread: threading.Thread | None = None
+        self._scrape_jobs: queue.Queue | None = None
+        self._scrape_busy = False
         self.watcher = None
         self.row_items: dict[str, tuple[str, str]] = {}
 
@@ -224,6 +234,10 @@ class FinanceAutomationApp:
         self.headless = tk.BooleanVar(value=not self.settings.headed)
         self.capturing_latest = False
         self.bulk_loading = False
+        self._filter_gen = 0
+        self._reload_gen = 0
+        self._tally_dirty = False
+        self._tally_after_id = None
         self.latest_run_ids: set[str] = set()
         self.sheet_id_cache: set[str] = set()
         self.sheet_id_cache_date = ""
@@ -275,10 +289,11 @@ class FinanceAutomationApp:
         self.db = GatheringDB(self.settings.database_path)
         self.dark_mode = tk.BooleanVar(value=load_gui_theme() == "dark")
         self.auto_running = False
-        self.auto_send_to_sheet = tk.BooleanVar(value=False)
+        self.auto_send_to_sheet = tk.BooleanVar(value=True)
         self._single_run_active = False
         self._auto_after_id: str | None = None
         self._auto_deadline = 0.0
+        self._live_stop = threading.Event()
         self.status_text = tk.StringVar(value="Idle")
         self.stat_pending = tk.StringVar(value="0")
         self.stat_extracted = tk.StringVar(value="0")
@@ -313,7 +328,7 @@ class FinanceAutomationApp:
                 "or enter a new website to switch."
             )
         self._bind_shortcuts()
-        self.root.after(120, self._drain_events)
+        self.root.after(50, self._drain_events)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _theme_name(self) -> str:
@@ -739,13 +754,13 @@ class FinanceAutomationApp:
         ttk.Button(sidebar, text="Run now", style="Run.TButton", command=self._run_now).pack(fill="x", pady=3)
         ttk.Label(
             sidebar,
-            text="Run now reads Completed once, shows remaining needed transactions, then stops. Use Automated Run to keep scraping on a timer.",
+            text="Run now reads Completed once. Automated Run selects the date, sets Status to COMPLETED, reads every page, shows rows in the GUI, and sends new IDs to the Google Sheet.",
             style="Muted.TLabel",
             wraplength=280,
         ).pack(anchor="w", pady=(8, 8))
         timer_row = ttk.Frame(sidebar, style="Card.TFrame")
         timer_row.pack(fill="x", pady=(0, 4))
-        ttk.Label(timer_row, text="Timer (seconds)", style="Muted.TLabel").pack(side="left")
+        ttk.Label(timer_row, text="Wait between scrapes (seconds)", style="Muted.TLabel").pack(side="left")
         ttk.Spinbox(
             timer_row,
             from_=5,
@@ -783,7 +798,7 @@ class FinanceAutomationApp:
         ).pack(fill="x", pady=3)
         ttk.Label(
             sidebar,
-            text="Automated Run scrapes Completed on this timer and adds only new IDs to Latest scrape. When the box above is checked, each extracted record is sent to the Google Sheet one by one. Stop Automated Run ends the loop.",
+            text="Automated Run opens the dashboard, selects today's date, sets Status to COMPLETED, and scrapes every page into the GUI. When the box above is checked, new IDs are written to the Google Sheet. After each scrape it waits the seconds you set, then starts the next. Stop Automated Run ends the loop.",
             style="Muted.TLabel",
             wraplength=280,
         ).pack(anchor="w", pady=(4, 10))
@@ -1230,7 +1245,40 @@ class FinanceAutomationApp:
         return box
 
     def _busy(self) -> bool:
-        return self.worker is not None and self.worker.is_alive()
+        if self._scrape_thread is not None and not self._scrape_thread.is_alive():
+            self._scrape_busy = False
+            self._scrape_thread = None
+        worker_alive = self.worker is not None and self.worker.is_alive()
+        if self.worker is not None and not worker_alive:
+            self.worker = None
+        return bool(self._scrape_busy) or worker_alive
+
+    def _ensure_scrape_worker(self) -> None:
+        if self._scrape_thread is not None and self._scrape_thread.is_alive():
+            return
+        self._scrape_jobs = queue.Queue()
+
+        def loop() -> None:
+            from src.scraper import DashboardSession
+
+            session = DashboardSession()
+            try:
+                while True:
+                    job = self._scrape_jobs.get()
+                    if job is None:
+                        break
+                    try:
+                        job(session)
+                    except Exception as exc:
+                        self.events.put({"kind": "log", "message": f"Run failed: {exc}"})
+                        self.events.put({"kind": "done", "message": str(exc)})
+                    finally:
+                        self._scrape_busy = False
+            finally:
+                session.close()
+
+        self._scrape_thread = threading.Thread(target=loop, name="scrape-worker", daemon=True)
+        self._scrape_thread.start()
 
     def _account_host(self, website: str) -> str:
         return website_host(website)
@@ -1645,6 +1693,7 @@ class FinanceAutomationApp:
         settings.filter_date_from = day
         settings.filter_date_to = day
         settings.filter_status = COMPLETED_STATUS
+        settings.use_dashboard_api = False
         for slot in GOOGLE_SHEET_SLOTS:
             sheet_id = self._sheet_id_from_field(slot)
             settings.set_sheet_id_at(slot, sheet_id)
@@ -1720,58 +1769,41 @@ class FinanceAutomationApp:
         if self._busy():
             messagebox.showinfo("Busy", "A run is already in progress.")
             return
-        write_sheet = False
-        if self.auto_send_to_sheet.get():
-            self._persist_google_sheets()
-            if not self._sheet_id_from_field(1):
-                messagebox.showwarning(
-                    "Google Sheet required",
-                    "Paste the Google Sheet URL or ID into Sheet 1 before using "
-                    "Send Extracted records to Google Sheet Automatically.",
-                )
-                return
-            write_sheet = True
+        self.auto_send_to_sheet.set(True)
+        self._persist_google_sheets()
+        if not self._sheet_id_from_field(1):
+            messagebox.showwarning(
+                "Google Sheet required",
+                "Paste the Google Sheet URL or ID into Sheet 1 so Completed "
+                "rows can be written after each scrape.",
+            )
+            return
         self._persist_login_fields()
         if not self._switch_workspace_if_needed():
             return
-        self.poll_interval.set(self._auto_interval_seconds())
         self._single_run_active = False
         self.auto_running = True
         self.capturing_latest = True
         self.arm_watcher_after_run = False
         self.pages.select(0)
+        self._live_stop = threading.Event()
         seconds = self._auto_interval_seconds()
-        self.status_text.set(f"Automated run every {seconds}s")
-        if write_sheet:
-            self._append_log(
-                f"Automated Run started. Scraping Completed every {seconds}s. "
-                "Already scraped IDs are skipped in Latest scrape. "
-                "Each extracted record will be sent to the Google Sheet automatically."
-            )
-        else:
-            self._append_log(
-                f"Automated Run started. Scraping Completed every {seconds}s. "
-                "Already scraped IDs are skipped in Latest scrape. "
-                "The Google Sheet is not updated until you send."
-            )
-        try:
-            started = self._start_job(
-                scrape=True,
-                write_sheet=write_sheet,
-                quiet=True,
-                one_by_one=write_sheet,
-            )
-            if not started:
-                self._schedule_next_auto()
-        except Exception as exc:
-            self._append_log(f"Automated Run failed: {exc}")
-            self._schedule_next_auto()
+        self.auto_interval.set(seconds)
+        self.poll_interval.set(seconds)
+        self.status_text.set("Automated run: scraping Completed")
+        self._append_log(
+            "Automated Run started. The browser will select the date, set Status "
+            "to COMPLETED, read every page into the GUI, and send new IDs to the Google Sheet. "
+            f"The next scrape waits {seconds}s after this one finishes."
+        )
+        self._auto_tick()
 
     def _stop_automated_run(self) -> None:
         if not self.auto_running and self._auto_after_id is None:
             self._append_log("Automated Run is not active.")
             return
         self.auto_running = False
+        self._live_stop.set()
         self._cancel_auto_timer()
         if not self._busy():
             self.capturing_latest = False
@@ -1820,8 +1852,8 @@ class FinanceAutomationApp:
         self.pages.select(0)
         write_sheet = self._auto_write_sheet()
         self._append_log(
-            f"Automated Run tick: scraping Completed for {self._scrape_date()} "
-            f"on {normalize_dashboard_url(self.login_website.get())}."
+            f"Automated Run tick: selecting date {self._scrape_date()}, Status COMPLETED, "
+            f"and scraping every page on {normalize_dashboard_url(self.login_website.get())}."
             + (
                 " New extracted records will be sent to the Google Sheet one by one."
                 if write_sheet
@@ -1833,6 +1865,7 @@ class FinanceAutomationApp:
                 scrape=True,
                 write_sheet=write_sheet,
                 quiet=True,
+                once=False,
                 one_by_one=write_sheet,
             )
             if not started:
@@ -1850,8 +1883,9 @@ class FinanceAutomationApp:
             or selected in {"", "All dates"}
             or self.sheet_id_cache_date == selected
         ):
-            if txn_id in self.sheet_id_cache:
-                return True
+            return txn_id in self.sheet_id_cache
+        if self.bulk_loading or self._scrape_busy:
+            return False
         for rec in self._section_records("sent"):
             values = rec.get("values") or ()
             if len(values) > 1 and str(values[1]) == txn_id:
@@ -2133,6 +2167,8 @@ class FinanceAutomationApp:
         self.status_text.set(
             "Running and sending to Google Sheet..." if write_sheet else "Running..."
         )
+        self._scrape_busy = True
+        self.bulk_loading = True
         settings = self._current_settings()
         if write_sheet:
             sheet_note = (
@@ -2150,7 +2186,7 @@ class FinanceAutomationApp:
         else:
             self._append_log("No 2FA code entered. If the site asks, type it in the browser window.")
 
-        def work() -> None:
+        def job(session) -> None:
             try:
                 run_pipeline(
                     settings,
@@ -2159,13 +2195,15 @@ class FinanceAutomationApp:
                     write_sheet=write_sheet,
                     once=once,
                     one_by_one=one_by_one,
+                    session=session,
                 )
             except Exception as exc:
                 self.events.put({"kind": "log", "message": f"Run failed: {exc}"})
                 self.events.put({"kind": "done", "message": str(exc)})
 
-        self.worker = threading.Thread(target=work, name="automation-run", daemon=True)
-        self.worker.start()
+        self._ensure_scrape_worker()
+        assert self._scrape_jobs is not None
+        self._scrape_jobs.put(job)
         return True
 
     def _stop_watcher(self) -> None:
@@ -2177,7 +2215,8 @@ class FinanceAutomationApp:
             self.watcher = None
 
     def _drain_events(self) -> None:
-        while True:
+        processed = 0
+        while processed < EVENT_BATCH:
             try:
                 event = self.events.get_nowait()
             except queue.Empty:
@@ -2186,6 +2225,9 @@ class FinanceAutomationApp:
                 self._handle_event(event)
             except Exception as exc:
                 self._append_log(f"Event handler error: {exc}")
+            processed += 1
+        if self._tally_dirty:
+            self._flush_live_tally()
         if not self._busy() and self.status_text.get() in {
             "Running...",
             "Running and sending to Google Sheet...",
@@ -2200,11 +2242,14 @@ class FinanceAutomationApp:
         if (
             self.auto_running
             and not self._single_run_active
-            and self._auto_after_id is None
             and not self._busy()
+            and self._live_stop.is_set()
         ):
-            self._schedule_next_auto()
-        self.root.after(120, self._drain_events)
+            self.auto_running = False
+            self.capturing_latest = False
+            self.status_text.set("Idle")
+            self._append_log("Automated Run ended.")
+        self.root.after(20 if processed else 50, self._drain_events)
 
     def _handle_event(self, event: dict) -> None:
         kind = event.get("kind")
@@ -2227,6 +2272,7 @@ class FinanceAutomationApp:
                 self._upsert_row(event, bucket="sent")
                 if txn_id:
                     self.sheet_id_cache.add(txn_id)
+            self._mark_tally_dirty()
         if event.get("message"):
             self._append_log(str(event["message"]))
         if event.get("counts"):
@@ -2238,12 +2284,14 @@ class FinanceAutomationApp:
             if self.website_date:
                 self.date_filter.set(self.website_date)
                 self.sent_date_filter.set(self.website_date)
-            self._refresh_filter_options()
-            self._apply_filters()
+            if not self.bulk_loading:
+                self._refresh_filter_options()
+                self._apply_filters()
+            self._mark_tally_dirty()
         if kind == "sheet_tally":
             self.sheet_date_count = int(event.get("sheet_count") or 0)
             self.sheet_tally_date = str(event.get("date") or "")
-            self._update_match_caption()
+            self._mark_tally_dirty()
         if kind == "sheet_ids":
             self.sheet_id_cache = {str(item) for item in (event.get("ids") or []) if item}
             self.sheet_id_cache_date = str(event.get("date") or "")
@@ -2261,6 +2309,15 @@ class FinanceAutomationApp:
                     + (f" of website Record {records}" if records else "")
                 )
         if kind == "done":
+            self.bulk_loading = False
+            will_reload = bool(self._single_run_active) or not self.auto_running
+            try:
+                if not will_reload:
+                    self._prune_gui_rows()
+                    self._refresh_filter_options()
+                    self._apply_filters()
+            except Exception:
+                pass
             self._prefer_sent_tab = self.open_sent_after_send
             if self._single_run_active:
                 self._single_run_active = False
@@ -2285,11 +2342,6 @@ class FinanceAutomationApp:
                     self._refresh_counts()
                 except Exception as exc:
                     self._append_log(f"Could not refresh counts: {exc}")
-                if self.auto_send_to_sheet.get():
-                    try:
-                        self._refresh_unsent_latest(log=False)
-                    except Exception as exc:
-                        self._append_log(f"Could not refresh unsent rows: {exc}")
                 return
             self.capturing_latest = False
             self.status_text.set("Idle")
@@ -2443,6 +2495,30 @@ class FinanceAutomationApp:
         total = sum(self._amount_of(rec) for rec in recs)
         return f"{len(recs)} txn  ·  {format_amount(total)}"
 
+    def _fmt_txn_money(self, count: int, total: float) -> str:
+        return f"{count} txn  ·  {format_amount(total)}"
+
+    def _mark_tally_dirty(self) -> None:
+        self._tally_dirty = True
+        if self._tally_after_id is not None:
+            return
+        self._tally_after_id = self.root.after(LIVE_TALLY_MS, self._flush_live_tally)
+
+    def _flush_live_tally(self) -> None:
+        if self._tally_after_id is not None:
+            try:
+                self.root.after_cancel(self._tally_after_id)
+            except Exception:
+                pass
+            self._tally_after_id = None
+        if not self._tally_dirty:
+            return
+        self._tally_dirty = False
+        try:
+            self._update_filter_caption()
+        except Exception:
+            pass
+
     def _selected_records(self, section: str) -> list[dict]:
         tree = self._tree_for(section)
         rows = []
@@ -2462,13 +2538,125 @@ class FinanceAutomationApp:
         return ids
 
     def _update_match_caption(self) -> None:
-        dated = self._dated(self._section_records("deposit")) + self._dated(
-            self._section_records("withdraw")
-        )
-        gui_ids = self._record_ids(dated)
-        sent_ids = self._record_ids(self._dated(self._section_records("sent"), "sent"))
-        latest_ids = self._record_ids(self._section_records("latest", visible_only=True))
+        self._update_filter_caption()
+
+    def _update_filter_caption(self) -> None:
+        self._tally_dirty = False
         date_sel = self.date_filter.get() or "All dates"
+        date_label = "all dates" if date_sel == "All dates" else date_sel
+        sent_date = self.sent_date_filter.get() or date_label
+        extracted_ids: set[str] = set()
+        sent_ids: set[str] = set()
+        pending_ids: set[str] = set()
+        failed_ids: set[str] = set()
+        latest_visible_ids: set[str] = set()
+        latest_visible: list[dict] = []
+        visible_counts = {"deposit": 0, "withdraw": 0, "sent": 0}
+        dep_n = dep_amt = 0.0
+        wd_n = wd_amt = 0.0
+        money = {
+            "deposit": {"pending": [0, 0.0], "sent": [0, 0.0], "failed": [0, 0.0], "visible": [0, 0.0]},
+            "withdraw": {"pending": [0, 0.0], "sent": [0, 0.0], "failed": [0, 0.0], "visible": [0, 0.0]},
+            "sent_dep": [0, 0.0],
+            "sent_wd": [0, 0.0],
+            "sent_vis": [0, 0.0],
+        }
+
+        for rec in self.row_store.values():
+            section = str(rec.get("section") or "")
+            values = rec.get("values") or ()
+            txn_id = str(values[1] if len(values) > 1 else "")
+            status = str((rec.get("tags") or ("",))[0])
+            amount = self._amount_of(rec)
+            dated = self._date_matches(str(rec.get("date") or ""), section)
+            visible = self._row_matches(rec, section)
+            if section in {"deposit", "withdraw"}:
+                if dated:
+                    if txn_id:
+                        extracted_ids.add(txn_id)
+                        if status in PENDING_TALLY_STATUSES:
+                            pending_ids.add(txn_id)
+                        elif status == "Failed":
+                            failed_ids.add(txn_id)
+                    if section == "deposit":
+                        dep_n += 1
+                        dep_amt += amount
+                    else:
+                        wd_n += 1
+                        wd_amt += amount
+                    bucket = money[section]
+                    if status in PENDING_TALLY_STATUSES:
+                        bucket["pending"][0] += 1
+                        bucket["pending"][1] += amount
+                    elif status in SENT_TALLY_STATUSES:
+                        bucket["sent"][0] += 1
+                        bucket["sent"][1] += amount
+                    elif status == "Failed":
+                        bucket["failed"][0] += 1
+                        bucket["failed"][1] += amount
+                if visible:
+                    visible_counts[section] += 1
+                    money[section]["visible"][0] += 1
+                    money[section]["visible"][1] += amount
+            elif section == "sent":
+                if dated and txn_id:
+                    sent_ids.add(txn_id)
+                    kind = self._section_for_type(rec.get("type"))
+                    key = "sent_wd" if kind == "withdraw" else "sent_dep"
+                    money[key][0] += 1
+                    money[key][1] += amount
+                if visible:
+                    visible_counts["sent"] += 1
+                    money["sent_vis"][0] += 1
+                    money["sent_vis"][1] += amount
+            elif section == "latest" and visible:
+                latest_visible.append(rec)
+                if txn_id:
+                    latest_visible_ids.add(txn_id)
+
+        extracted = len(extracted_ids)
+        sent = len(sent_ids)
+        self.stat_extracted.set(str(extracted))
+        self.stat_copied.set(str(sent))
+        self.stat_pending.set(str(len(pending_ids)))
+        self.stat_failed.set(str(len(failed_ids)))
+        self.filter_caption.set(
+            f"Completed · {date_label}  ·  "
+            f"{extracted} unique txn  ·  "
+            f"Deposits {self._fmt_txn_money(int(dep_n), dep_amt)}  ·  "
+            f"Withdrawals {self._fmt_txn_money(int(wd_n), wd_amt)}"
+        )
+        self.latest_title.set(
+            f"Latest scrape  ·  Extracted Transactions: {extracted} on {date_label}"
+        )
+        self.deposit_title.set(f"Deposits  ·  {visible_counts['deposit']} visible")
+        self.withdraw_title.set(f"Withdrawals  ·  {visible_counts['withdraw']} visible")
+        self.sent_title.set(
+            f"Google Sheet sent data  ·  Sent Count to Google Sheets: {sent} on {sent_date}"
+        )
+        self.latest_tally.set(self._section_tally_line("latest", latest_visible))
+        for section, variable in (
+            ("deposit", self.deposit_tally),
+            ("withdraw", self.withdraw_tally),
+        ):
+            selected = self._selected_records(section)
+            extra = f"  ·  Selected {self._tally_text(selected)}" if selected else ""
+            variable.set(
+                f"To send {self._fmt_txn_money(*money[section]['pending'])}  ·  "
+                f"Sent {self._fmt_txn_money(*money[section]['sent'])}  ·  "
+                f"Failed {self._fmt_txn_money(*money[section]['failed'])}  ·  "
+                f"Visible {self._fmt_txn_money(*money[section]['visible'])}"
+                f"{extra}"
+            )
+        sent_selected = self._selected_records("sent")
+        sent_extra = f"  ·  Selected {self._tally_text(sent_selected)}" if sent_selected else ""
+        self.sent_tally.set(
+            f"Sent deposits {self._fmt_txn_money(*money['sent_dep'])}  ·  "
+            f"Sent withdrawals {self._fmt_txn_money(*money['sent_wd'])}  ·  "
+            f"Visible {self._fmt_txn_money(*money['sent_vis'])}"
+            f"{sent_extra}"
+        )
+
         website = self.website_records
         website_bit = (
             f"Website Completed Record: {website}"
@@ -2477,10 +2665,8 @@ class FinanceAutomationApp:
             else "Website Completed Record: —"
         )
         compare_date = self.website_date or date_sel
-        scraped = len(gui_ids)
-        sent = len(sent_ids)
-        scrape_match = bool(website) and website == scraped
-        sheet_match = bool(website) and website == sent and scraped == sent
+        scrape_match = bool(website) and website == extracted
+        sheet_match = bool(website) and website == sent and extracted == sent
         if website and scrape_match and sheet_match:
             tally = "ALL MATCH"
         elif website and scrape_match:
@@ -2488,72 +2674,20 @@ class FinanceAutomationApp:
         else:
             tally = "not matched yet"
         sheet_bit = ""
-        if self.sheet_date_count and (not self.sheet_tally_date or self.sheet_tally_date in {compare_date, date_sel, self.sent_date_filter.get()}):
+        if self.sheet_date_count and (
+            not self.sheet_tally_date
+            or self.sheet_tally_date in {compare_date, date_sel, self.sent_date_filter.get()}
+        ):
             sheet_live = (
-                "match"
-                if website and self.sheet_date_count == website
-                else "live count"
+                "match" if website and self.sheet_date_count == website else "live count"
             )
             sheet_bit = f"  ·  Google Sheet live: {self.sheet_date_count} txn ({sheet_live})"
         self.match_caption.set(
-            f"{website_bit}  ·  Scraped {compare_date}: {scraped} txn  ·  "
-            f"Latest scrape: {len(latest_ids)}  ·  "
+            f"{website_bit}  ·  Scraped {compare_date}: {extracted} txn  ·  "
+            f"Latest scrape: {len(latest_visible_ids)}  ·  "
             f"Google Sheet sent: {sent} txn  ·  {tally}"
             f"{sheet_bit}"
         )
-
-    def _update_filter_caption(self) -> None:
-        date_sel = self.date_filter.get() or "All dates"
-        date_label = "all dates" if date_sel == "All dates" else date_sel
-        latest = self._section_records("latest", visible_only=True)
-        deposits = self._section_records("deposit", visible_only=True)
-        withdrawals = self._section_records("withdraw", visible_only=True)
-        sent = self._section_records("sent", visible_only=True)
-        deposit_all = self._section_records("deposit")
-        withdraw_all = self._section_records("withdraw")
-        gui_ids = self._record_ids(
-            self._dated(deposit_all) + self._dated(withdraw_all)
-        )
-        self.filter_caption.set(
-            f"Completed · {date_label}  ·  "
-            f"{len(gui_ids)} unique txn  ·  "
-            f"Deposits {self._tally_text(self._dated(deposit_all))}  ·  "
-            f"Withdrawals {self._tally_text(self._dated(withdraw_all))}"
-        )
-        self.latest_title.set(
-            f"Latest scrape  ·  Extracted Transactions: {len(gui_ids)} on {date_label}"
-        )
-        self.deposit_title.set(f"Deposits  ·  {len(deposits)} visible")
-        self.withdraw_title.set(f"Withdrawals  ·  {len(withdrawals)} visible")
-        sent_date = self.sent_date_filter.get() or date_label
-        sent_ids = self._record_ids(self._dated(self._section_records("sent"), "sent"))
-        self.sent_title.set(
-            f"Google Sheet sent data  ·  Sent Count to Google Sheets: {len(sent_ids)} on {sent_date}"
-        )
-        self.stat_extracted.set(str(len(gui_ids)))
-        self.stat_copied.set(str(len(sent_ids)))
-        pending_ids = self._record_ids(
-            [
-                rec
-                for rec in self._dated(deposit_all) + self._dated(withdraw_all)
-                if str((rec.get("tags") or ("",))[0])
-                in {"Pending", "Gathered", "Preview", "Copying"}
-            ]
-        )
-        failed_ids = self._record_ids(
-            [
-                rec
-                for rec in self._dated(deposit_all) + self._dated(withdraw_all)
-                if str((rec.get("tags") or ("",))[0]) == "Failed"
-            ]
-        )
-        self.stat_pending.set(str(len(pending_ids)))
-        self.stat_failed.set(str(len(failed_ids)))
-        self.latest_tally.set(self._section_tally_line("latest", latest))
-        self.deposit_tally.set(self._money_tally_line("deposit"))
-        self.withdraw_tally.set(self._money_tally_line("withdraw"))
-        self.sent_tally.set(self._sent_tally_line(sent))
-        self._update_match_caption()
 
     def _dated(self, recs: list[dict], section: str | None = None) -> list[dict]:
         return [rec for rec in recs if self._date_matches(str(rec.get("date") or ""), section)]
@@ -2612,10 +2746,50 @@ class FinanceAutomationApp:
         self.date_combo.configure(values=date_options)
         if hasattr(self, "sent_date_combo"):
             self.sent_date_combo.configure(values=date_options)
-        self._update_filter_caption()
+        self._mark_tally_dirty()
+
+    def _prune_gui_rows(self) -> None:
+        limits = {
+            "latest": min(400, GUI_ROW_LIMIT),
+            "deposit": GUI_ROW_LIMIT,
+            "withdraw": GUI_ROW_LIMIT,
+            "sent": GUI_ROW_LIMIT,
+        }
+        for section, limit in limits.items():
+            entries = [
+                (key, rec)
+                for key, rec in list(self.row_store.items())
+                if key[0] == section
+            ]
+            if len(entries) <= limit:
+                continue
+            entries.sort(
+                key=lambda item: str((item[1].get("values") or ("",))[0]),
+                reverse=True,
+            )
+            tree = self._tree_for(section)
+            for key, rec in entries[limit:]:
+                _bucket, item = key
+                if tree.exists(item):
+                    tree.delete(item)
+                self.row_store.pop(key, None)
+                values = rec.get("values") or ()
+                txn_id = str(values[1] if len(values) > 1 else "")
+                store_key = self._item_key(section, txn_id) if txn_id else ""
+                if store_key and self.row_items.get(store_key) == (section, item):
+                    self.row_items.pop(store_key, None)
+                if section == "latest" and txn_id:
+                    self.latest_run_ids.discard(txn_id)
 
     def _apply_filters(self) -> None:
-        for key, rec in self.row_store.items():
+        self._filter_gen += 1
+        self._apply_filters_chunked(list(self.row_store.items()), 0, self._filter_gen)
+
+    def _apply_filters_chunked(self, items: list, index: int, gen: int) -> None:
+        if gen != self._filter_gen:
+            return
+        end = min(index + FILTER_BATCH, len(items))
+        for key, rec in items[index:end]:
             section, item = key
             tree = self._tree_for(section)
             if not tree.exists(item):
@@ -2624,6 +2798,14 @@ class FinanceAutomationApp:
                 tree.reattach(item, "", 0)
             else:
                 tree.detach(item)
+        if end < len(items):
+            self.root.after(
+                10,
+                lambda rows=items, nxt=end, token=gen: self._apply_filters_chunked(
+                    rows, nxt, token
+                ),
+            )
+            return
         self._update_filter_caption()
 
     def _on_filters_changed(self, _event=None) -> None:
@@ -2695,24 +2877,29 @@ class FinanceAutomationApp:
             "tags": (status,),
         }
         self.row_store[(section, item)] = rec
+        self._mark_tally_dirty()
         if not self.bulk_loading:
             self._refresh_filter_options()
             if self._row_matches(rec, section):
                 tree.reattach(item, "", 0)
             else:
                 tree.detach(item)
-            self._update_filter_caption()
 
     def _append_log(self, message: str) -> None:
         stamp = datetime.now().strftime("%H:%M:%S")
         self.log.configure(state="normal")
         self.log.insert("end", f"[{stamp}] {message}\n")
+        try:
+            if int(float(self.log.index("end-1c"))) > LOG_LINE_LIMIT:
+                self.log.delete("1.0", "200.0")
+        except Exception:
+            pass
         self.log.see("end")
         self.log.configure(state="disabled")
 
     def _apply_counts(self, counts: dict) -> None:
         self.stat_skipped.set(str(counts.get("skipped", 0)))
-        self._update_filter_caption()
+        self._mark_tally_dirty()
 
     def _refresh_counts(self) -> None:
         self._apply_counts(self.db.counts())
@@ -2734,18 +2921,33 @@ class FinanceAutomationApp:
         return event
 
     def _reload_workspace(self) -> None:
+        self._reload_gen += 1
+        gen = self._reload_gen
         self.bulk_loading = True
-        try:
-            self._clear_bucket("deposit")
-            self._clear_bucket("withdraw")
-            self._clear_bucket("sent")
-            for row in reversed(self.db.all_records()):
-                event = self._event_from_db_row(row)
-                self._upsert_row(event)
-                if str(row["copy_status"]) in {"copied", "skipped"}:
-                    self._upsert_row(event, bucket="sent")
-        finally:
-            self.bulk_loading = False
+        self._clear_bucket("deposit")
+        self._clear_bucket("withdraw")
+        self._clear_bucket("sent")
+        rows = list(reversed(self.db.all_records(limit=GUI_ROW_LIMIT)))
+        self._reload_rows_chunked(rows, 0, gen)
+
+    def _reload_rows_chunked(self, rows: list, index: int, gen: int) -> None:
+        if gen != self._reload_gen:
+            return
+        end = min(index + EVENT_BATCH, len(rows))
+        for row in rows[index:end]:
+            event = self._event_from_db_row(row)
+            self._upsert_row(event)
+            if str(row["copy_status"]) in {"copied", "skipped"}:
+                self._upsert_row(event, bucket="sent")
+        if end < len(rows):
+            self.root.after(
+                15,
+                lambda data=rows, nxt=end, token=gen: self._reload_rows_chunked(
+                    data, nxt, token
+                ),
+            )
+            return
+        self.bulk_loading = False
         self._refresh_filter_options()
         self._apply_filters()
 
@@ -2755,8 +2957,17 @@ class FinanceAutomationApp:
 
     def _on_close(self) -> None:
         self.auto_running = False
+        self._live_stop.set()
         self._cancel_auto_timer()
+        if self._tally_after_id is not None:
+            try:
+                self.root.after_cancel(self._tally_after_id)
+            except Exception:
+                pass
+            self._tally_after_id = None
         self._stop_watcher()
+        if self._scrape_jobs is not None:
+            self._scrape_jobs.put(None)
         self._save_current_workspace_state()
         self.root.destroy()
 

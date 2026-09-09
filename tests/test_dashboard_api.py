@@ -6,12 +6,13 @@ from unittest.mock import patch
 
 from src.config import Settings
 from src.dashboard_api import (
-    ApiCapture,
+    LIVE_POST_JS,
     dashboard_origin,
     fetch_completed,
     list_filter_payload,
     load_api_session,
     looks_like_list_payload,
+    post_with_page,
     transaction_from_api,
 )
 from src.models import Transaction
@@ -113,6 +114,55 @@ class DashboardApiTests(unittest.TestCase):
         self.assertFalse(looks_like_list_payload("<html>login</html>"))
         self.assertFalse(looks_like_list_payload({"ok": True}))
 
+    def test_live_post_does_not_use_jquery(self) -> None:
+        self.assertNotIn("jQuery", LIVE_POST_JS)
+        self.assertIn("fetch(", LIVE_POST_JS)
+
+    def test_post_with_page_uses_browser_request_not_jquery(self) -> None:
+        payload = {
+            "transactions": [SAMPLE_ROW],
+            "totalCount": 1,
+            "totalPage": 1,
+            "totalAmount": 530.27,
+        }
+
+        class FakeResponse:
+            status = 200
+
+            def json(self):
+                return payload
+
+        class FakeRequest:
+            def __init__(self) -> None:
+                self.form = None
+                self.headers = None
+
+            def post(self, _url, form=None, headers=None, timeout=None):
+                self.form = form
+                self.headers = headers
+                return FakeResponse()
+
+        class FakePage:
+            def __init__(self) -> None:
+                self.request = FakeRequest()
+
+            def evaluate(self, js, _data=None):
+                text = str(js)
+                if "fetch(" in text or "getAllTransactions" in text:
+                    raise AssertionError("in-page fetch should not run when request works")
+                return "tok"
+
+        page = FakePage()
+        result, error = post_with_page(
+            page,
+            "/transactions/getAllTransactions",
+            {"status": "COMPLETED"},
+            "https://skgaming4.as6868.com",
+        )
+        self.assertEqual(error, "")
+        self.assertEqual(result["totalCount"], 1)
+        self.assertNotIn("token", page.request.form or {})
+
     def test_load_api_session_reads_admin_token(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "auth_state.json"
@@ -200,27 +250,37 @@ class DashboardApiTests(unittest.TestCase):
 
         self.assertIsNone(fetch_completed(post, _settings()))
 
-    def test_http_path_does_not_launch_browser(self) -> None:
-        api = ApiCapture(
-            transactions=[
-                Transaction(
-                    transaction_id="9",
-                    username="A1",
-                    amount="10",
-                    status="DEPOSIT",
-                )
-            ],
-            website_records=1,
-            website_total="10.00",
+    def test_fetch_skips_known_ids_on_first_page(self) -> None:
+        pages = {
+            0: {
+                "transactions": [SAMPLE_ROW],
+                "totalCount": 1,
+                "totalPage": 1,
+                "totalAmount": 530.27,
+            }
+        }
+
+        def post(_path: str, data: dict[str, str]):
+            return pages[int(data["pageIndex"])]
+
+        capture = fetch_completed(
+            post,
+            _settings(),
+            known_ids={"17113600239"},
+            catch_up=False,
+            quiet=True,
+            expect_new=0,
         )
-        with patch("src.scraper.scrape_via_http", return_value=api) as http:
-            with patch("src.scraper.sync_playwright") as playwright:
-                result = scrape_transactions(_settings(use_open_browser=False))
-        http.assert_called_once()
-        playwright.assert_not_called()
-        self.assertEqual(result.transactions[0].transaction_id, "9")
-        self.assertEqual(result.transactions[0].extras.get("tally_date"), "2026-09-08")
-        self.assertEqual(result.website_records, 1)
+        self.assertIsNotNone(capture)
+        self.assertEqual(capture.transactions, [])
+        self.assertEqual(capture.website_records, 1)
+
+    def test_scrape_uses_browser_filters_not_http_shortcut(self) -> None:
+        with patch("src.scraper.sync_playwright") as playwright:
+            playwright.side_effect = RuntimeError("browser scrape path")
+            with self.assertRaisesRegex(RuntimeError, "browser scrape path"):
+                scrape_transactions(_settings(use_open_browser=False))
+        playwright.assert_called()
 
 
 if __name__ == "__main__":

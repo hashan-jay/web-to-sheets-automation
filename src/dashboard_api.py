@@ -14,6 +14,47 @@ from src.models import Transaction
 from src.tally import COMPLETED_STATUS, format_amount, parse_amount
 
 LIST_PATH = "/transactions/getAllTransactions"
+READ_ADMIN_TOKEN_JS = """() => {
+  try {
+    const admin = JSON.parse(localStorage.getItem("ADMIN") || "{}") || {};
+    return String(admin.token || "");
+  } catch (err) {
+    return "";
+  }
+}"""
+LIVE_POST_JS = """
+async (data) => {
+  const params = data || {};
+  let token = "";
+  try {
+    const admin = JSON.parse(localStorage.getItem("ADMIN") || "{}") || {};
+    token = String(admin.token || "");
+  } catch (err) {}
+  const headers = {
+    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+    "X-Requested-With": "XMLHttpRequest",
+  };
+  if (token) headers.token = token;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
+  try {
+    const resp = await fetch("/transactions/getAllTransactions", {
+      method: "POST",
+      headers,
+      body: new URLSearchParams(params),
+      credentials: "same-origin",
+      signal: controller.signal,
+    });
+    const text = await resp.text();
+    try { return JSON.parse(text); }
+    catch (err) { return { error: "not-json", status: resp.status }; }
+  } catch (err) {
+    return { error: String((err && err.name) || err), status: 0 };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+"""
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
@@ -77,6 +118,8 @@ def list_filter_payload(settings: Settings, page_index: int = 0) -> dict[str, st
     day = (settings.filter_date_from or "").strip()
     end = (settings.filter_date_to or day).strip() or day
     status = (settings.filter_status or COMPLETED_STATUS).strip() or COMPLETED_STATUS
+    if "COMPLETED" not in status.upper():
+        status = COMPLETED_STATUS
     tx_type = (settings.filter_type or "ACTIVE").strip() or "ACTIVE"
     return {
         "pageIndex": str(max(int(page_index), 0)),
@@ -96,17 +139,22 @@ def list_filter_payload(settings: Settings, page_index: int = 0) -> dict[str, st
     }
 
 
-def looks_like_list_payload(raw: object) -> bool:
+def unwrap_list_payload(raw: object) -> dict | None:
     if not isinstance(raw, dict):
-        return False
-    rows = raw.get("transactions")
-    if not isinstance(rows, list):
-        return False
-    if "totalCount" in raw or "totalPage" in raw or "totalAmount" in raw:
-        return True
-    return bool(rows) and isinstance(rows[0], dict) and (
-        "id" in rows[0] or "user" in rows[0]
-    )
+        return None
+    if raw.get("error") and not isinstance(raw.get("transactions"), list):
+        return None
+    if isinstance(raw.get("transactions"), list):
+        return raw
+    for key in ("data", "result", "payload"):
+        inner = raw.get(key)
+        if isinstance(inner, dict) and isinstance(inner.get("transactions"), list):
+            return inner
+    return None
+
+
+def looks_like_list_payload(raw: object) -> bool:
+    return unwrap_list_payload(raw) is not None
 
 
 def _text(value: object) -> str:
@@ -235,16 +283,23 @@ def fetch_completed(
     limit: int | None = None,
     on_event=None,
     max_pages: int | None = None,
+    known_ids: set[str] | None = None,
+    catch_up: bool = True,
+    quiet: bool = False,
+    expect_new: int | None = None,
 ) -> ApiCapture | None:
-    first = post(LIST_PATH, list_filter_payload(settings, 0))
-    if not looks_like_list_payload(first):
+    first = unwrap_list_payload(post(LIST_PATH, list_filter_payload(settings, 0)))
+    if not first:
         return None
     total_count = int(first.get("totalCount") or 0)
     total_pages = int(first.get("totalPage") or 0)
     page_limit = total_pages or 1
     if max_pages:
         page_limit = min(page_limit, max(int(max_pages), 1))
+    if not catch_up:
+        page_limit = min(page_limit, 4)
     collected: dict[str, Transaction] = {}
+    seen = set(known_ids or ())
 
     def _take(payload: dict, page_num: int) -> None:
         rows = payload.get("transactions") or []
@@ -252,9 +307,12 @@ def fetch_completed(
             if not isinstance(raw, dict):
                 continue
             txn = transaction_from_api(raw)
-            if txn.transaction_id:
-                collected[txn.transaction_id] = txn
-        if on_event:
+            if not txn.transaction_id or txn.transaction_id in collected:
+                continue
+            if known_ids is not None and txn.transaction_id in seen:
+                continue
+            collected[txn.transaction_id] = txn
+        if on_event and not quiet:
             on_event(
                 {
                     "kind": "log",
@@ -267,23 +325,31 @@ def fetch_completed(
 
     pages_read = 1
     _take(first, 1)
-    if total_count and not collected:
+    if total_count and not collected and not seen:
         return None
-    for page_index in range(1, page_limit):
-        if limit and len(collected) >= limit:
-            break
-        if total_count and len(collected) >= total_count:
-            break
-        payload = post(LIST_PATH, list_filter_payload(settings, page_index))
-        if not looks_like_list_payload(payload):
-            break
-        before = len(collected)
-        pages_read += 1
-        _take(payload, page_index + 1)
-        if len(collected) == before:
-            break
+    missing = 0 if expect_new is None else max(0, int(expect_new))
+    need_more = catch_up or (known_ids is not None and missing > len(collected))
+    if need_more:
+        indexes = list(range(1, page_limit))
+        if known_ids is not None and not catch_up and total_pages > 1:
+            indexes = list(range(total_pages - 1, 0, -1))[: max(page_limit - 1, 0)]
+        for page_index in indexes:
+            if limit and len(collected) >= limit:
+                break
+            if known_ids is None and total_count and len(collected) >= total_count:
+                break
+            if known_ids is not None and missing and len(collected) >= missing:
+                break
+            payload = unwrap_list_payload(post(LIST_PATH, list_filter_payload(settings, page_index)))
+            if not payload:
+                break
+            before = len(collected)
+            pages_read += 1
+            _take(payload, page_index + 1)
+            if len(collected) == before and catch_up:
+                break
 
-    if total_count and not collected:
+    if total_count and not collected and not seen:
         return None
     rows = list(collected.values())
     if limit:
@@ -317,55 +383,140 @@ def _with_token(data: dict[str, str], token: str) -> dict[str, str]:
     return payload
 
 
-def http_post(session: ApiSession, path: str, data: dict[str, str], timeout: int = 30) -> Any:
-    client = requests.Session()
-    for cookie in session.cookies:
-        name = str(cookie.get("name") or "")
-        value = str(cookie.get("value") or "")
-        if not name:
-            continue
-        client.cookies.set(
-            name,
-            value,
-            domain=str(cookie.get("domain") or "") or None,
-            path=str(cookie.get("path") or "/") or "/",
-        )
-    url = session.origin.rstrip("/") + path
+def post_with_page(page, path: str, data: dict[str, str], origin: str = "") -> tuple[Any, str]:
+    """POST the list using the logged-in page cookies, without jQuery (no site spinner)."""
+    token = ""
     try:
-        response = client.post(
+        token = str(page.evaluate(READ_ADMIN_TOKEN_JS) or "")
+    except Exception:
+        token = ""
+    url = (origin or "").rstrip("/") + path
+    raw = None
+    error = ""
+    try:
+        response = page.request.post(
             url,
-            data=_with_token(data, session.token),
-            headers=_request_headers(session.origin, session.token),
-            timeout=timeout,
+            form=data,
+            headers=_request_headers(origin, token),
+            timeout=8000,
         )
-    except requests.RequestException:
-        return None
-    if response.status_code >= 400:
-        return None
+        if response.status >= 400:
+            error = f"HTTP {response.status}"
+        else:
+            try:
+                raw = response.json()
+            except Exception:
+                error = "response was not JSON"
+    except Exception as exc:
+        error = str(exc)
+    payload = unwrap_list_payload(raw)
+    if payload is not None:
+        return payload, ""
     try:
-        return response.json()
-    except ValueError:
-        return None
+        raw = page.evaluate(LIVE_POST_JS, data)
+    except Exception as exc:
+        return None, error or str(exc)
+    payload = unwrap_list_payload(raw)
+    if payload is not None:
+        return payload, ""
+    status = ""
+    if isinstance(raw, dict):
+        status = str(raw.get("error") or raw.get("status") or "")
+    return None, error or status or "dashboard did not return a transaction list"
+
+
+class DashboardClient:
+    def __init__(
+        self,
+        session: ApiSession,
+        timeout: float | tuple[float, float] = (5.0, 8.0),
+    ) -> None:
+        self.session = session
+        self.timeout = timeout
+        self.last_error = ""
+        self.http = requests.Session()
+        host = (urlparse(session.origin).hostname or "").lower()
+        for cookie in session.cookies:
+            name = str(cookie.get("name") or "")
+            value = str(cookie.get("value") or "")
+            if not name:
+                continue
+            domain = str(cookie.get("domain") or "").lstrip(".").lower()
+            if domain and host and domain not in host and host not in domain:
+                continue
+            try:
+                self.http.cookies.set(
+                    name,
+                    value,
+                    domain=domain or None,
+                    path=str(cookie.get("path") or "/") or "/",
+                )
+            except Exception:
+                self.http.cookies.set(name, value)
+        self.http.headers.update(_request_headers(session.origin, session.token))
+
+    @classmethod
+    def from_settings(cls, settings: Settings) -> DashboardClient | None:
+        session = load_api_session(settings)
+        if not session:
+            return None
+        return cls(session)
+
+    def post(self, path: str, data: dict[str, str]) -> Any:
+        url = self.session.origin.rstrip("/") + path
+        try:
+            response = self.http.post(url, data=data, timeout=self.timeout)
+        except requests.RequestException as exc:
+            self.last_error = str(exc)
+            return None
+        if response.status_code >= 400:
+            self.last_error = f"HTTP {response.status_code}"
+            return None
+        try:
+            raw = response.json()
+        except ValueError:
+            self.last_error = "response was not JSON"
+            return None
+        payload = unwrap_list_payload(raw)
+        if payload is None:
+            keys = (
+                ",".join(sorted(str(key) for key in raw.keys()))
+                if isinstance(raw, dict)
+                else type(raw).__name__
+            )
+            self.last_error = f"unexpected JSON keys: {keys or 'none'}"
+            return None
+        self.last_error = ""
+        return payload
+
+
+def http_post(session: ApiSession, path: str, data: dict[str, str], timeout: int = 30) -> Any:
+    return DashboardClient(session, timeout=timeout).post(path, data)
 
 
 def scrape_via_http(
     settings: Settings,
     limit: int | None = None,
     on_event=None,
+    known_ids: set[str] | None = None,
+    catch_up: bool = True,
+    quiet: bool = False,
+    client: DashboardClient | object | None = None,
+    expect_new: int | None = None,
 ) -> ApiCapture | None:
-    session = load_api_session(settings)
-    if not session:
+    transport = client or DashboardClient.from_settings(settings)
+    if not transport:
         return None
-
-    def post(path: str, data: dict[str, str]) -> Any:
-        return http_post(session, path, data)
-
     return fetch_completed(
-        post,
+        transport.post,
         settings,
         limit=limit,
         on_event=on_event,
         max_pages=settings.max_pages,
+        known_ids=known_ids,
+        catch_up=catch_up,
+        quiet=quiet,
+        expect_new=expect_new,
     )
 
 
@@ -393,9 +544,10 @@ def scrape_via_playwright_request(
         if response.status >= 400:
             return None
         try:
-            return response.json()
+            raw = response.json()
         except Exception:
             return None
+        return unwrap_list_payload(raw)
 
     return fetch_completed(
         post,

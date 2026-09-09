@@ -43,9 +43,12 @@ class GatheringDB:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             conn.executescript(SCHEMA)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute("PRAGMA temp_store=MEMORY")
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path)
+        conn = sqlite3.connect(self.path, timeout=30)
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -148,6 +151,11 @@ class GatheringDB:
                 """,
                 (status, detail, _now(), transaction_id),
             )
+
+    def known_ids(self) -> set[str]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT transaction_id FROM notifications").fetchall()
+        return {str(row["transaction_id"]) for row in rows if row["transaction_id"]}
 
     def counts(self) -> dict[str, int]:
         with self._connect() as conn:

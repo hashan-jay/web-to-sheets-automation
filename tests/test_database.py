@@ -81,6 +81,18 @@ class GatheringDBTests(unittest.TestCase):
         today = transactions_for_date(self.db, "2026-08-30")
         self.assertEqual([row.transaction_id for row in today], ["17110853320"])
 
+    def test_all_records_can_limit_rows(self) -> None:
+        self.db.ingest(
+            [
+                Transaction(transaction_id="a"),
+                Transaction(transaction_id="b"),
+                Transaction(transaction_id="c"),
+            ]
+        )
+        rows = self.db.all_records(limit=2)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["transaction_id"], "c")
+
 
 if __name__ == "__main__":
     unittest.main()
