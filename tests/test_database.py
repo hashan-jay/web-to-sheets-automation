@@ -34,6 +34,14 @@ class GatheringDBTests(unittest.TestCase):
         self.assertEqual(self.db.reset_to_pending(["17110853301"]), 1)
         self.assertEqual(self.db.counts()["pending"], 1)
 
+    def test_requeue_copied_record_for_resend(self) -> None:
+        txn = Transaction(transaction_id="17110853302", amount="12", status="DEPOSIT")
+        self.db.ingest([txn])
+        self.db.mark("17110853302", "copied", "tab 10")
+        self.assertEqual(self.db.requeue(["17110853302"]), 1)
+        self.assertEqual(self.db.counts()["pending"], 1)
+        self.assertEqual(self.db.by_ids(["17110853302"])[0].amount, "12")
+
     def test_transactions_for_date(self) -> None:
         self.db.ingest(
             [

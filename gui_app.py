@@ -2121,7 +2121,7 @@ class FinanceAutomationApp:
 
         def work() -> None:
             try:
-                self.db.reset_to_pending(ids)
+                self.db.requeue(ids)
                 process_new_notifications_only(
                     settings,
                     on_event=self.events.put,
@@ -2342,6 +2342,10 @@ class FinanceAutomationApp:
                     self._refresh_counts()
                 except Exception as exc:
                     self._append_log(f"Could not refresh counts: {exc}")
+                try:
+                    self._queue_sheet_unsent_check()
+                except Exception as exc:
+                    self._append_log(f"Unsent check failed: {exc}")
                 return
             self.capturing_latest = False
             self.status_text.set("Idle")

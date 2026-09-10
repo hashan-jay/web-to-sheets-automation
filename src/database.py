@@ -204,3 +204,36 @@ class GatheringDB:
                 ids,
             )
             return int(cur.rowcount)
+
+    def requeue(self, transaction_ids: list[str]) -> int:
+        """Put these IDs back in the to-send queue, even if they were marked sent."""
+        ids = [item for item in transaction_ids if item]
+        if not ids:
+            return 0
+        placeholders = ",".join("?" for _ in ids)
+        with self._connect() as conn:
+            cur = conn.execute(
+                f"""
+                UPDATE notifications
+                SET copy_status = 'pending', detail = '', processed_at = NULL
+                WHERE transaction_id IN ({placeholders})
+                """,
+                ids,
+            )
+            return int(cur.rowcount)
+
+    def by_ids(self, transaction_ids: list[str]) -> list[Transaction]:
+        ids = [item for item in transaction_ids if item]
+        if not ids:
+            return []
+        placeholders = ",".join("?" for _ in ids)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT payload_json FROM notifications
+                WHERE transaction_id IN ({placeholders})
+                ORDER BY id
+                """,
+                ids,
+            ).fetchall()
+        return [_transaction_from_payload(row["payload_json"]) for row in rows]

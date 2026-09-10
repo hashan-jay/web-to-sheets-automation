@@ -15,7 +15,7 @@ from src.mapper import (
 )
 from src.models import Transaction
 from src.scraper import scrape_transactions
-from src.tally import COMPLETED_STATUS
+from src.tally import COMPLETED_STATUS, local_today
 from src.sheets import WITHDRAW_FIRST_DATA_ROW, SheetClient, new_rows_only
 
 EventFn = Callable[[dict], None]
@@ -230,6 +230,24 @@ def gather_from_dashboard(
     return result
 
 
+def unsent_candidates(
+    db: GatheringDB,
+    day: str = "",
+    only_ids: set[str] | None = None,
+) -> list[Transaction]:
+    """GUI/DB rows that still need a Google Sheet write.
+
+    Automated Run uses the selected date so a leftover Gathered row is
+    found even when the database already marked it copied or failed.
+    """
+    if only_ids is not None:
+        return _unique_transactions(db.by_ids(list(only_ids)))
+    rows = list(db.pending()) + list(db.by_status("failed"))
+    if day:
+        rows.extend(transactions_for_date(db, day))
+    return _unique_transactions(rows)
+
+
 def copy_pending_to_sheet(
     settings: Settings,
     db: GatheringDB,
@@ -239,9 +257,8 @@ def copy_pending_to_sheet(
     one_by_one: bool = False,
 ) -> PipelineResult:
     result = PipelineResult()
-    pending = db.pending()
-    if only_ids is not None:
-        pending = [txn for txn in pending if txn.transaction_id in only_ids]
+    day = (settings.filter_date_from or "").strip() or local_today()
+    pending = unsent_candidates(db, day=day, only_ids=only_ids)
     if not pending:
         _emit(on_event, kind="log", message="No pending notifications in the gathering database.")
         return result
@@ -260,14 +277,14 @@ def copy_pending_to_sheet(
         return result
 
     settings.require_sheets()
-    groups = _group_by_day(pending, settings.filter_date_from)
+    groups = _group_by_day(pending, day)
     targets = settings.sheet_slots()
     _emit(
         on_event,
         kind="log",
-        message="Send will write the same rows to "
+        message="Send will write any GUI record that is not on "
         + ", ".join(f"Sheet {slot}" for slot, _sheet_id in targets)
-        + ".",
+        + " yet. To send should become 0.",
     )
     for slot, sheet_id in targets:
         try:
@@ -282,18 +299,17 @@ def copy_pending_to_sheet(
         _emit(
             on_event,
             kind="log",
-            message=f"{_sheet_label(sheet)}: sending rows.",
+            message=f"{_sheet_label(sheet)}: sending missing rows for {day}.",
         )
-        for day, txns in groups.items():
-            _write_day_rows(
+        for one_day, txns in groups.items():
+            _send_missing_day_rows(
                 settings,
                 db,
                 sheet,
-                day,
+                one_day,
                 txns,
                 result,
                 on_event,
-                action="Copied",
                 one_by_one=one_by_one,
             )
     return result
@@ -489,6 +505,85 @@ def _blank_sheet_bank(sheet: SheetClient, on_event: EventFn | None) -> None:
                 f"deposit and withdraw row(s) of tab {sheet.tab_title()}."
             ),
         )
+
+
+def _send_missing_day_rows(
+    settings: Settings,
+    db: GatheringDB,
+    sheet: SheetClient,
+    day: str,
+    txns: list[Transaction],
+    result: PipelineResult,
+    on_event: EventFn | None,
+    one_by_one: bool = False,
+) -> None:
+    try:
+        sheet.use_day(day)
+    except Exception as exc:
+        for txn in txns:
+            db.mark(txn.transaction_id, "failed", str(exc))
+            result.failed += 1
+            _emit(on_event, **txn_row_event(txn, "Failed", str(exc)))
+        return
+    existing_ids = sheet.existing_ids()
+    missing = new_rows_only(txns, existing_ids)
+    queued = {
+        txn.transaction_id
+        for txn in list(db.pending()) + list(db.by_status("failed"))
+        if txn.transaction_id
+    }
+    for txn in txns:
+        if txn.transaction_id not in existing_ids or txn.transaction_id not in queued:
+            continue
+        db.mark(txn.transaction_id, "skipped", f"Already on Google Sheet tab {sheet.tab_title()}")
+        result.skipped += 1
+        _emit(
+            on_event,
+            **txn_row_event(
+                txn,
+                "Skipped",
+                f"Already on Google Sheet tab {sheet.tab_title()}",
+            ),
+        )
+    if not missing:
+        _emit(
+            on_event,
+            kind="log",
+            message=(
+                f"{_sheet_label(sheet)}: tab {sheet.tab_title()} already has every "
+                f"GUI record for {day}. To send: 0."
+            ),
+        )
+        return
+    db.requeue([txn.transaction_id for txn in missing])
+    _emit(
+        on_event,
+        kind="log",
+        message=(
+            f"{_sheet_label(sheet)}: found {len(missing)} missing record(s) for {day} "
+            f"on tab {sheet.tab_title()}. Restoring them in the GUI and sending now."
+        ),
+    )
+    for txn in missing:
+        _emit(
+            on_event,
+            **txn_row_event(
+                txn,
+                "Gathered",
+                "Missing from Google Sheet — restored to the GUI and queued to send",
+            ),
+        )
+    _write_day_rows(
+        settings,
+        db,
+        sheet,
+        day,
+        missing,
+        result,
+        on_event,
+        action="Copied",
+        one_by_one=one_by_one,
+    )
 
 
 def _write_day_rows(
@@ -707,6 +802,17 @@ def _sync_one_day(
         return
     existing_ids, _by_date = sheet.id_index()
     missing = new_rows_only(txns, existing_ids)
+    if missing:
+        db.requeue([txn.transaction_id for txn in missing])
+        for txn in missing:
+            _emit(
+                on_event,
+                **txn_row_event(
+                    txn,
+                    "Gathered",
+                    "Missing from Google Sheet — restoring to the GUI and sending",
+                ),
+            )
     sheet_count = len(existing_ids)
     _emit(
         on_event,
