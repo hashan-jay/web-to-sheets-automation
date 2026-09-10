@@ -104,6 +104,13 @@ class DashboardApiTests(unittest.TestCase):
         self.assertEqual(txn.created, "2026-08-29 10:44")
         self.assertEqual(txn.processed, "2026-08-29 10:44")
         self.assertEqual(txn.brand, "FUCKFUCKVIPC")
+        self.assertEqual(txn.attachment, "")
+        with_receipt = dict(SAMPLE_ROW)
+        with_receipt["type"] = "DEPOSIT"
+        with_receipt["details"] = {"receipt": "https://cdn.example.com/deposit.jpg"}
+        deposit = transaction_from_api(with_receipt)
+        self.assertEqual(deposit.attachment, "https://cdn.example.com/deposit.jpg")
+        self.assertEqual(deposit.extras.get("attachment"), "https://cdn.example.com/deposit.jpg")
 
     def test_looks_like_list_payload(self) -> None:
         self.assertTrue(

@@ -216,7 +216,11 @@ def sheet_amount(amount: object, status: object) -> str:
 
 
 def sheet_bank(txn: Transaction, settings: Settings) -> str:
-    return ""
+    """Company BANK dropdown value for deposits only. Withdrawals stay blank."""
+    if is_withdraw(txn.status):
+        return ""
+    extras = txn.extras or {}
+    return str(extras.get("sheet_bank") or "").strip()
 
 
 def sheet_description(txn: Transaction) -> str:

@@ -71,12 +71,13 @@ def ledger_write_batches(
 ) -> tuple[list[tuple[str, list[list[str]]]], int]:
     """Split A–L into writable column runs that avoid locked cells."""
     values = [pad_sheet_row(row) for row in rows]
-    for row in values:
-        row[SHEET_COL_BANK] = ""
+    skip = {int(index) for index in (skip_columns or set())}
+    if SHEET_COL_BANK in skip:
+        for row in values:
+            row[SHEET_COL_BANK] = ""
     if first_data_row:
         start = max(start, first_data_row)
     end = start + len(values) - 1
-    skip = {int(index) for index in (skip_columns or set())}
     batches: list[tuple[str, list[list[str]]]] = []
     col = 0
     while col < SHEET_COL_COUNT:
@@ -461,7 +462,11 @@ class SheetClient:
             withdraw = bool(withdraws)
         last_error: Exception | None = None
         skip_day = self._skip_day_column or bool(self._ledger_start)
-        skip_bank = bool(getattr(self, "_skip_bank_column", False) or skip_day)
+        skip_bank = bool(withdraw)
+        if not skip_bank:
+            skip_bank = not any(
+                str(pad_sheet_row(row)[SHEET_COL_BANK] or "").strip() for row in rows
+            )
         used_safe_plan = False
         for attempt in range(4):
             try:

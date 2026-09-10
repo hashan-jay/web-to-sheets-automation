@@ -6,6 +6,7 @@ import time
 from src.config import Settings
 from src.dashboard_api import DashboardClient, dashboard_origin, post_with_page, scrape_via_http
 from src.database import GatheringDB
+from src.deposit_bank import fill_deposit_banks, sheet_bank_choices
 from src.mapper import sheet_game_choices, to_sheet_row
 from src.models import Transaction
 from src.pipeline import EventFn, PipelineResult, _open_sheet, txn_row_event
@@ -83,6 +84,7 @@ class LiveSheetWriter:
                 continue
             games = self._games.get(int(getattr(sheet, "slot", 0) or 0))
             try:
+                fill_deposit_banks(self.settings, [txn], self.on_event, choices=sheet_bank_choices(self.settings))
                 sheet.write_row(to_sheet_row(txn, self.settings, games=games))
             except Exception as exc:
                 db.mark(txn.transaction_id, "failed", str(exc))

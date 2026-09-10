@@ -16,6 +16,7 @@ from src.mapper import (
     normalize_status,
     record_local_datetime,
     sheet_amount,
+    sheet_bank,
     sheet_game_choices,
     sheet_status,
     sheet_tab_name,
@@ -131,6 +132,17 @@ class MapperTests(unittest.TestCase):
         self.assertEqual(normalize_brand("NETLOSSN", settings), "")
         self.assertEqual(normalize_brand("NETLOSSB", settings), "")
         self.assertEqual(normalize_brand("POKIESPARK VIP", settings), "POKIESPARK")
+        deposit_bank = Transaction(
+            transaction_id="17110853300",
+            amount="30",
+            status="DEPOSIT",
+            extras={"sheet_bank": "ANZPLUS O'NEILL R W"},
+        )
+        self.assertEqual(sheet_bank(deposit_bank, settings), "ANZPLUS O'NEILL R W")
+        self.assertEqual(
+            to_sheet_row(deposit_bank, settings)[2],
+            "ANZPLUS O'NEILL R W",
+        )
 
     def test_withdraw_card_mapping(self) -> None:
         settings = _settings()

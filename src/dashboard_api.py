@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 import requests
 
 from src.config import Settings, normalize_dashboard_url
+from src.deposit_bank import extract_attachment_url
 from src.mapper import captured_brand, first_brand_tag
 from src.models import Transaction
 from src.tally import COMPLETED_STATUS, format_amount, parse_amount
@@ -236,6 +237,18 @@ def transaction_from_api(row: dict) -> Transaction:
     if not isinstance(details, dict):
         details = {}
     txn_type = _text(row.get("type") or row.get("transactionType")).upper()
+    attachment = extract_attachment_url(
+        {
+            "attachment": row.get("attachment") or details.get("attachment"),
+            "attachments": row.get("attachments") or details.get("attachments"),
+            "receipt": row.get("receipt") or details.get("receipt"),
+            "image": row.get("image") or details.get("image"),
+            "file": row.get("file") or details.get("file"),
+            "proof": row.get("proof") or details.get("proof"),
+            "details": details,
+        }
+    )
+    extras = {"attachment": attachment} if attachment else {}
     return Transaction(
         transaction_id=_text(row.get("id") or row.get("transactionId")),
         username=_text(user.get("username")),
@@ -265,6 +278,8 @@ def transaction_from_api(row: dict) -> Transaction:
         bank_lock=_text(
             bank_info.get("lock") or bank_info.get("bankLock") or user.get("bankLock")
         ),
+        attachment=attachment,
+        extras=extras,
     )
 
 

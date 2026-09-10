@@ -103,12 +103,29 @@ class SheetDedupeTests(unittest.TestCase):
             start=20,
             skip_day_column=True,
             first_data_row=105,
+            skip_bank_column=True,
         )
         self.assertEqual(start, 105)
-        self.assertEqual(range_name, "B105:L105")
+        self.assertEqual(range_name, "B105:B105")
         self.assertEqual(values[0][0], "2026-09-02")
-        self.assertEqual(values[0][1], "")
         self.assertNotIn("2", values[0][:1])
+        skip_batches, skip_start = ledger_write_batches(
+            [["2", "2026-09-02", "ANZ", "Name", "10", "Deposit", "1", "FUCKFUCK", "", "A1", "", ""]],
+            start=20,
+            skip_columns=ledger_skip_columns(True, True),
+            first_data_row=105,
+        )
+        self.assertEqual(skip_start, 105)
+        self.assertEqual([item[0] for item in skip_batches], ["B105:B105", "D105:L105"])
+        kept_range, kept_values, kept_start = ledger_write_plan(
+            [["10", "2026-09-10", "ANZPLUS O'NEILL R W", "Name", "10", "Deposit", "9", "FUCKSPIN", "", "A1", "", ""]],
+            start=105,
+            skip_day_column=True,
+            skip_bank_column=False,
+        )
+        self.assertEqual(kept_start, 105)
+        self.assertEqual(kept_range, "B105:L105")
+        self.assertEqual(kept_values[0][1], "ANZPLUS O'NEILL R W")
         dummy_range, dummy_values, dummy_start = ledger_write_plan(
             [["2", "2026-09-02", "", "Name", "10", "Deposit", "1", "FUCKSPIN", "", "A1", "", ""]],
             start=2,

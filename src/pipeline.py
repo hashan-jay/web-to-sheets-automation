@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 from src.config import Settings
 from src.database import GatheringDB, _transaction_from_payload
+from src.deposit_bank import discover_bank_choices, fill_deposit_banks, sheet_bank_choices
 from src.mapper import (
     captured_brand,
     clean_name,
@@ -649,6 +650,10 @@ def _write_day_rows(
                 + "."
             ),
         )
+    banks = tuple(
+        dict.fromkeys(sheet_bank_choices(settings) + discover_bank_choices(sheet))
+    )
+    fill_deposit_banks(settings, to_copy, on_event, choices=banks)
     detail = (
         f"Row appended to Google Sheet tab {sheet.tab_title()}"
         if action == "Copied"

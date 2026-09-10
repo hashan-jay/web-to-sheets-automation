@@ -23,4 +23,5 @@ class Transaction:
     bsb: str = ""
     pay_id: str = ""
     bank_lock: str = ""
+    attachment: str = ""
     extras: dict[str, str] = field(default_factory=dict)

@@ -485,6 +485,19 @@ EXTRACT_CARDS_JS = r"""
     const processed = actionText.match(/PROCESSED\s+(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})/i);
     if (created) data.created = created[1];
     if (processed) data.processed = processed[1];
+    const attachEl = Array.from(tr.querySelectorAll("a, button, span")).find((el) =>
+      /attachment/i.test((el.textContent || "") + " " + (el.getAttribute("href") || ""))
+    );
+    if (attachEl) {
+      const onclick = attachEl.getAttribute("onclick") || "";
+      const fromClick = onclick.match(/https?:\/\/[^'"\s]+|\/[^'"\s]+\.(?:png|jpe?g|webp|gif|bmp|pdf)/i);
+      data.attachment = (fromClick && fromClick[0])
+        || attachEl.getAttribute("href")
+        || attachEl.getAttribute("data-url")
+        || attachEl.getAttribute("data-src")
+        || attachEl.href
+        || "";
+    }
     return data;
   }).filter((row) => row.transaction_id);
 }
@@ -1031,6 +1044,10 @@ def _to_transaction(raw: dict) -> Transaction:
         bsb=str(raw.get("BankBSB") or "").strip(),
         pay_id=str(raw.get("PayID") or "").strip(),
         bank_lock=str(raw.get("BankLock") or "").strip(),
+        attachment=str(raw.get("attachment") or "").strip(),
+        extras={"attachment": str(raw.get("attachment") or "").strip()}
+        if str(raw.get("attachment") or "").strip()
+        else {},
     )
 
 

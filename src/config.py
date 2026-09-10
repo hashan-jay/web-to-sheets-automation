@@ -224,6 +224,10 @@ def _path(name: str, default: str) -> Path:
     return path if path.is_absolute() else ROOT / path
 
 
+def _csv_tuple(raw: str) -> tuple[str, ...]:
+    return tuple(part.strip() for part in str(raw or "").split(",") if part.strip())
+
+
 def _aliases(raw: str) -> dict[str, str]:
     mapping: dict[str, str] = {}
     for part in raw.split(","):
@@ -260,6 +264,7 @@ class Settings:
         "AUZBETS",
         "WEMETH",
     )
+    bank_accounts: tuple[str, ...] = ()
     headed: bool = True
     slow_mo_ms: int = 0
     max_pages: int = 200
@@ -336,6 +341,7 @@ class Settings:
                 ).split(",")
                 if part.strip()
             ),
+            bank_accounts=_csv_tuple(os.getenv("BANK_ACCOUNTS", "")),
             headed=_bool("HEADED", True),
             slow_mo_ms=_int("SLOW_MO_MS", 0),
             max_pages=_int("MAX_PAGES", 200),
