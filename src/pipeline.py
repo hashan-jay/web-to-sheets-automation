@@ -655,7 +655,7 @@ def _write_day_rows(
                         f" (withdrawals from row {WITHDRAW_FIRST_DATA_ROW})."
                         if withdraw_block
                         else (
-                            " in B:L (skipped locked column A and rows 1–104)."
+                            " in unlocked cells only (skipped locked columns and heading rows)."
                             if skip_day
                             else "."
                         )

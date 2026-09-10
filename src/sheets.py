@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import gspread
 from gspread.exceptions import APIError
 
+from src.config import service_account_email
 from src.errors import ConfigError
 from src.mapper import (
     SHEET_COL_BANK,
+    SHEET_COL_COUNT,
+    SHEET_COL_DAY,
     SHEET_COL_STATUS,
     date_key,
     is_withdraw,
@@ -18,16 +22,74 @@ from src.mapper import (
 )
 from src.models import Transaction
 
-# GROUP U AUD SEPTEMBER 2026 day tabs have the ledger headings above row 105.
+# GROUP * AUD SEPTEMBER 2026 day tabs have the ledger headings above row 105.
 LEDGER_FIRST_DATA_ROW = 105
 # Withdrawals sit in a lower block on every linked day tab.
 WITHDRAW_FIRST_DATA_ROW = 1024
 LEDGER_TITLE_MARKERS = ("group u aud september", "group d aud september")
 
 
+def normalize_sheet_title(spreadsheet_title: str) -> str:
+    return " ".join(
+        (spreadsheet_title or "").strip().lower().replace("-", " ").replace("_", " ").split()
+    )
+
+
 def uses_locked_day_column(spreadsheet_title: str) -> bool:
-    """GROUP D / Sheet 3 locks column A on every date tab."""
-    return uses_group_d_games(spreadsheet_title)
+    """September group day tabs lock column A (DAY) on every date tab."""
+    return uses_ledger_start(spreadsheet_title) or uses_group_d_games(spreadsheet_title)
+
+
+def col_letter(index: int) -> str:
+    """Convert a 0-based column index to A1 notation (0 -> A)."""
+    number = int(index) + 1
+    letters = ""
+    while number:
+        number, rem = divmod(number - 1, 26)
+        letters = chr(65 + rem) + letters
+    return letters
+
+
+def ledger_skip_columns(
+    skip_day_column: bool,
+    skip_bank_column: bool = False,
+    extra: set[int] | frozenset[int] | None = None,
+) -> set[int]:
+    skip = set(extra or ())
+    if skip_day_column:
+        skip.add(SHEET_COL_DAY)
+    if skip_bank_column:
+        skip.add(SHEET_COL_BANK)
+    return skip
+
+
+def ledger_write_batches(
+    rows: list[list[str]],
+    start: int,
+    skip_columns: set[int] | frozenset[int] | None = None,
+    first_data_row: int = 0,
+) -> tuple[list[tuple[str, list[list[str]]]], int]:
+    """Split A–L into writable column runs that avoid locked cells."""
+    values = [pad_sheet_row(row) for row in rows]
+    for row in values:
+        row[SHEET_COL_BANK] = ""
+    if first_data_row:
+        start = max(start, first_data_row)
+    end = start + len(values) - 1
+    skip = {int(index) for index in (skip_columns or set())}
+    batches: list[tuple[str, list[list[str]]]] = []
+    col = 0
+    while col < SHEET_COL_COUNT:
+        if col in skip:
+            col += 1
+            continue
+        run_start = col
+        while col < SHEET_COL_COUNT and col not in skip:
+            col += 1
+        run_end = col - 1
+        range_name = f"{col_letter(run_start)}{start}:{col_letter(run_end)}{end}"
+        batches.append((range_name, [row[run_start : run_end + 1] for row in values]))
+    return batches, start
 
 
 def ledger_write_plan(
@@ -35,29 +97,160 @@ def ledger_write_plan(
     start: int,
     skip_day_column: bool,
     first_data_row: int = 0,
+    skip_bank_column: bool = False,
 ) -> tuple[str, list[list[str]], int]:
     """Build a write that stays out of locked heading cells.
 
-    GROUP D: never write column A, and never write above row 105.
+    September ledgers: never write column A, and never write above row 105.
     """
-    values = [pad_sheet_row(row) for row in rows]
-    for row in values:
-        row[SHEET_COL_BANK] = ""
-    if first_data_row:
-        start = max(start, first_data_row)
-    end = start + len(values) - 1
-    if skip_day_column:
-        return f"B{start}:L{end}", [row[1:] for row in values], start
-    return f"A{start}:L{end}", values, start
+    skip = ledger_skip_columns(skip_day_column, skip_bank_column)
+    batches, start = ledger_write_batches(rows, start, skip, first_data_row)
+    if not batches:
+        return f"B{start}:L{start}", [], start
+    return batches[0][0], batches[0][1], start
 
 
 def uses_ledger_start(spreadsheet_title: str) -> bool:
-    title = " ".join(
-        (spreadsheet_title or "").strip().lower().replace("-", " ").replace("_", " ").split()
-    )
-    if "september" in title and ("group u" in title or "group d" in title):
+    title = normalize_sheet_title(spreadsheet_title)
+    if "september" in title and (
+        "group" in title or "aud" in title or "kaboom" in title
+    ):
         return True
     return any(marker in title for marker in LEDGER_TITLE_MARKERS)
+
+
+UNBOUNDED_ROW = 1_000_000
+# Date, description, amount, status, ID, company, player — never skip these if writable.
+REQUIRED_WRITE_COLS = (1, 3, 4, 5, 6, 7, 9)
+
+
+@dataclass(frozen=True)
+class LockedBlock:
+    start_row: int
+    end_row: int
+    start_col: int
+    end_col: int
+
+    def covers_row(self, row: int) -> bool:
+        return self.start_row <= int(row) <= self.end_row
+
+    def covers_col(self, col: int) -> bool:
+        return self.start_col <= int(col) <= self.end_col
+
+    def overlaps_rows(self, start: int, end: int) -> bool:
+        return not (self.end_row < start or self.start_row > end)
+
+
+def writer_can_edit_protection(raw: dict, writer_email: str) -> bool:
+    if raw.get("warningOnly"):
+        return True
+    writer = (writer_email or "").strip().lower()
+    editors = raw.get("editors") or {}
+    users = {str(item).strip().lower() for item in (editors.get("users") or [])}
+    return bool(writer) and writer in users
+
+
+def parse_locked_blocks(
+    metadata: dict,
+    worksheet_id: int,
+    writer_email: str = "",
+) -> list[LockedBlock]:
+    """Return protections the service account must not write through."""
+    wanted = int(worksheet_id)
+    blocks: list[LockedBlock] = []
+    for sheet in metadata.get("sheets") or []:
+        props = sheet.get("properties") or {}
+        if int(props.get("sheetId") or -1) != wanted:
+            continue
+        for raw in sheet.get("protectedRanges") or []:
+            if writer_can_edit_protection(raw, writer_email):
+                continue
+            rng = raw.get("range") or {}
+            start_row = rng.get("startRowIndex")
+            end_row = rng.get("endRowIndex")
+            start_col = rng.get("startColumnIndex")
+            end_col = rng.get("endColumnIndex")
+            blocks.append(
+                LockedBlock(
+                    start_row=1 if start_row is None else int(start_row) + 1,
+                    end_row=UNBOUNDED_ROW if end_row is None else int(end_row),
+                    start_col=0 if start_col is None else int(start_col),
+                    end_col=UNBOUNDED_ROW if end_col is None else int(end_col) - 1,
+                )
+            )
+    return blocks
+
+
+def locked_columns_in_rows(
+    blocks: list[LockedBlock], start: int, end: int
+) -> set[int]:
+    locked: set[int] = set()
+    for block in blocks:
+        if not block.overlaps_rows(start, end):
+            continue
+        first = max(block.start_col, 0)
+        last = min(block.end_col, SHEET_COL_COUNT - 1)
+        for col in range(first, last + 1):
+            locked.add(col)
+    return locked
+
+
+def next_unlocked_row(
+    blocks: list[LockedBlock],
+    start: int,
+    n_rows: int = 1,
+    last_row: int = 0,
+    required: tuple[int, ...] = REQUIRED_WRITE_COLS,
+) -> int:
+    """First row where required cashbook columns are not protected."""
+    row = max(int(start), 1)
+    needed = set(required)
+    while row < UNBOUNDED_ROW:
+        end = row + max(int(n_rows), 1) - 1
+        if last_row and row > last_row:
+            return next_unlocked_row(blocks, last_row + 1, n_rows, 0, required)
+        locked = locked_columns_in_rows(blocks, row, end)
+        if not (needed & locked):
+            return row
+        jump_to = row
+        for block in blocks:
+            if block.covers_row(row) and any(block.covers_col(col) for col in needed):
+                jump_to = max(jump_to, block.end_row)
+        row = jump_to + 1
+    return 0
+
+
+def writable_append_row(
+    id_col: list[str],
+    blocks: list[LockedBlock],
+    first_data_row: int,
+    n_rows: int = 1,
+    last_data_row: int = 0,
+    required: tuple[int, ...] = REQUIRED_WRITE_COLS,
+) -> int:
+    """First empty ID row whose required cells are unlocked."""
+    row = max(int(first_data_row or 1), 1)
+    cap = int(last_data_row or 0)
+    beyond = False
+    while row < UNBOUNDED_ROW:
+        if cap and row > cap:
+            if beyond:
+                return 0
+            beyond = True
+            cap = 0
+            continue
+        value = id_col[row - 1] if row <= len(id_col) else ""
+        if str(value).strip().isdigit():
+            row += 1
+            continue
+        unlocked = next_unlocked_row(blocks, row, n_rows, cap, required)
+        if not unlocked:
+            return 0
+        if unlocked != row:
+            row = unlocked
+            continue
+        return row
+    return 0
 
 
 def day_tab_candidates(day_number: str) -> list[str]:
@@ -96,11 +289,13 @@ def protected_range_error(exc: Exception) -> ConfigError | None:
         return None
     return ConfigError(
         "Google Sheet tab has protected cells, so the writer cannot add rows. "
-        "Open that spreadsheet as the owner → Data → Protect sheets and ranges. "
-        "On this date tab, either remove protection from the data rows "
-        "(keep the heading/summary rows locked if you want), or add "
+        "This app now skips locked column A and heading rows 1–104, and writes "
+        "deposits from row 105 and withdrawals from row 1024. If it still fails, "
+        "open that date tab as the owner → Data → Protect sheets and ranges. "
+        "Keep A:A and C1:AQ104 locked if you want. Unlock the data rows "
+        "(C105:L1023 for deposits, C1024:L1044 for withdrawals), or add "
         "sheets-writer@finance-automation-507106.iam.gserviceaccount.com "
-        "as an editor of the protected range. Then Sync again."
+        "as an editor of those protected ranges. Then Sync again."
     )
 
 
@@ -121,14 +316,18 @@ class SheetClient:
                 LEDGER_FIRST_DATA_ROW if uses_ledger_start(self.spreadsheet.title) else 0
             )
             self._skip_day_column = uses_locked_day_column(self.spreadsheet.title)
+            self._skip_bank_column = self._skip_day_column
             if self._skip_day_column:
                 self._ledger_start = LEDGER_FIRST_DATA_ROW
             self.last_write_start = 0
             self._fallback_title = (worksheet or "").strip()
+            self._writer_email = service_account_email(Path(credentials_path))
+            self._lock_cache: dict[str, list[LockedBlock]] = {}
             if self._fallback_title:
                 self.ws = self.spreadsheet.worksheet(self._fallback_title)
             else:
                 self.ws = self.spreadsheet.sheet1
+            self._apply_title_layout()
         except APIError as exc:
             raise_if_office_file(exc)
             raise
@@ -138,11 +337,13 @@ class SheetClient:
         if not tab:
             if self._fallback_title:
                 self.ws = self.spreadsheet.worksheet(self._fallback_title)
+                self._apply_tab_layout()
                 return self.ws
             raise ConfigError("Cannot choose a Google Sheet tab: the transaction has no date.")
         found = find_day_worksheet(self.spreadsheet, tab)
         if found:
             self.ws = found
+            self._apply_tab_layout()
             return self.ws
         title = day_tab_candidates(tab)[0]
         try:
@@ -151,6 +352,30 @@ class SheetClient:
             raise_if_office_file(exc)
             raise
         return self.ws
+
+    def _apply_title_layout(self) -> None:
+        if uses_ledger_start(self.spreadsheet.title) or uses_locked_day_column(
+            self.spreadsheet.title
+        ):
+            self._ledger_start = LEDGER_FIRST_DATA_ROW
+            self._skip_day_column = True
+            self._skip_bank_column = True
+
+    def _apply_tab_layout(self) -> None:
+        """Treat day tabs with the September ledger header as locked ledgers."""
+        self._apply_title_layout()
+        if self._ledger_start and self._skip_day_column:
+            return
+        try:
+            ids = self.ws.col_values(7)
+            days = self.ws.col_values(1)
+        except Exception:
+            return
+        if not looks_like_ledger_tab(days, ids):
+            return
+        self._ledger_start = LEDGER_FIRST_DATA_ROW
+        self._skip_day_column = True
+        self._skip_bank_column = True
 
     def tab_title(self) -> str:
         return self.ws.title
@@ -172,30 +397,28 @@ class SheetClient:
                 time.sleep(20 * (attempt + 1))
         raise last_error or RuntimeError("Google Sheets read failed.")
 
-    def next_empty_row(self, *, withdraw: bool = False) -> int:
+    def next_empty_row(self, *, withdraw: bool = False, n_rows: int = 1) -> int:
         ids = self.ws.col_values(7)
+        blocks = self._protected_blocks()
+        last_deposit = WITHDRAW_FIRST_DATA_ROW - 1
         if withdraw:
-            return next_append_row(ids, first_data_row=WITHDRAW_FIRST_DATA_ROW)
+            return writable_append_row(
+                ids,
+                blocks,
+                first_data_row=WITHDRAW_FIRST_DATA_ROW,
+                n_rows=n_rows,
+            )
         days = self.ws.col_values(1) if not self._ledger_start else []
         start_at = self._ledger_start or header_locked_data_row(days, ids)
-        last_deposit = WITHDRAW_FIRST_DATA_ROW - 1
-        if start_at:
-            return next_append_row(
-                ids, first_data_row=start_at, last_data_row=last_deposit
-            )
-        last_id = 0
-        for index, value in enumerate(ids, start=1):
-            if index > last_deposit:
-                break
-            if str(value).strip().isdigit():
-                last_id = index
-        if last_id:
-            nxt = last_id + 1
-            return nxt if nxt <= last_deposit else 0
-        start = len(ids) + 1
-        if start <= last_deposit:
-            return start
-        return 2
+        if not start_at:
+            start_at = next_append_row(ids, last_data_row=last_deposit) or 2
+        return writable_append_row(
+            ids,
+            blocks,
+            first_data_row=start_at,
+            n_rows=n_rows,
+            last_data_row=last_deposit,
+        )
 
     def clear_bank_names(self) -> int:
         last_error: Exception | None = None
@@ -237,38 +460,115 @@ class SheetClient:
                 )
             withdraw = bool(withdraws)
         last_error: Exception | None = None
-        first_data_row = (
-            WITHDRAW_FIRST_DATA_ROW if withdraw else self._ledger_start
-        )
+        skip_day = self._skip_day_column or bool(self._ledger_start)
+        skip_bank = bool(getattr(self, "_skip_bank_column", False) or skip_day)
+        used_safe_plan = False
         for attempt in range(4):
             try:
-                start = self.next_empty_row(withdraw=withdraw)
+                start = self.next_empty_row(withdraw=withdraw, n_rows=len(rows))
                 if not start:
                     kind = "withdrawal" if withdraw else "deposit"
                     raise ConfigError(
-                        f"No empty {kind} rows left on tab {self.tab_title()}."
+                        f"No empty unlocked {kind} rows left on tab {self.tab_title()}."
                     )
-                range_name, values, start = ledger_write_plan(
+                end = start + len(rows) - 1
+                skip = ledger_skip_columns(skip_day, skip_bank)
+                skip |= locked_columns_in_rows(self._protected_blocks(), start, end)
+                if set(REQUIRED_WRITE_COLS) & skip:
+                    start = writable_append_row(
+                        self.ws.col_values(7),
+                        self._protected_blocks(),
+                        first_data_row=start,
+                        n_rows=len(rows),
+                    )
+                    if not start:
+                        raise ConfigError(
+                            f"No unlocked cashbook cells left on tab {self.tab_title()}."
+                        )
+                    end = start + len(rows) - 1
+                    skip = ledger_skip_columns(skip_day, skip_bank)
+                    skip |= locked_columns_in_rows(self._protected_blocks(), start, end)
+                batches, start = ledger_write_batches(
                     rows,
                     start,
-                    skip_day_column=self._skip_day_column,
-                    first_data_row=first_data_row,
+                    skip,
+                    first_data_row=0,
                 )
+                if not batches:
+                    return 0
                 self.last_write_start = start
-                self._ensure_row_capacity(start + len(values) - 1)
-                self.ws.update(
-                    range_name=range_name,
-                    values=values,
-                    value_input_option="USER_ENTERED",
-                )
+                self._ensure_row_capacity(start + len(rows) - 1)
+                self._push_batches(batches)
+                self._skip_day_column = skip_day
+                self._skip_bank_column = skip_bank
+                if skip_day and not self._ledger_start and not withdraw:
+                    self._ledger_start = LEDGER_FIRST_DATA_ROW
                 return len(rows)
             except APIError as exc:
-                raise_if_office_file(exc)
+                office = office_file_error(exc)
+                if office:
+                    raise office from exc
+                locked = protected_range_error(exc)
+                if locked and not used_safe_plan:
+                    used_safe_plan = True
+                    skip_day = True
+                    skip_bank = True
+                    self._skip_day_column = True
+                    self._skip_bank_column = True
+                    getattr(self, "_lock_cache", {}).pop(self.tab_title(), None)
+                    if not withdraw:
+                        self._ledger_start = LEDGER_FIRST_DATA_ROW
+                    last_error = locked
+                    continue
+                if locked:
+                    raise locked from exc
                 last_error = exc
                 if "429" not in str(exc) or attempt == 3:
                     raise
                 time.sleep(20 * (attempt + 1))
         raise last_error or RuntimeError("Google Sheets write failed.")
+
+    def _protected_blocks(self) -> list[LockedBlock]:
+        if not hasattr(self, "_lock_cache") or self._lock_cache is None:
+            self._lock_cache = {}
+        title = ""
+        try:
+            title = self.tab_title()
+        except Exception:
+            title = ""
+        cached = self._lock_cache.get(title)
+        if cached is not None:
+            return cached
+        blocks: list[LockedBlock] = []
+        try:
+            meta = self.spreadsheet.fetch_sheet_metadata(
+                params={
+                    "fields": "sheets(properties(sheetId,title),protectedRanges)"
+                }
+            )
+            blocks = parse_locked_blocks(
+                meta,
+                int(getattr(self.ws, "id", 0) or 0),
+                getattr(self, "_writer_email", ""),
+            )
+        except Exception:
+            blocks = []
+        self._lock_cache[title] = blocks
+        return blocks
+
+    def _push_batches(self, batches: list[tuple[str, list[list[str]]]]) -> None:
+        if len(batches) == 1:
+            range_name, values = batches[0]
+            self.ws.update(
+                range_name=range_name,
+                values=values,
+                value_input_option="USER_ENTERED",
+            )
+            return
+        self.ws.batch_update(
+            [{"range": range_name, "values": values} for range_name, values in batches],
+            value_input_option="USER_ENTERED",
+        )
 
     def _ensure_row_capacity(self, last_row: int) -> None:
         needed = max(int(last_row) + 50, WITHDRAW_FIRST_DATA_ROW + 50)
@@ -299,6 +599,11 @@ def header_locked_data_row(day_col: list[str], id_col: list[str]) -> int:
     if day == "day" or txn_id == "id":
         return LEDGER_FIRST_DATA_ROW
     return 0
+
+
+def looks_like_ledger_tab(day_col: list[str], id_col: list[str]) -> bool:
+    """True when this date tab uses the September heading block above row 105."""
+    return bool(header_locked_data_row(day_col, id_col))
 
 
 def find_header_row(day_col: list[str], date_col: list[str], id_col: list[str]) -> int:

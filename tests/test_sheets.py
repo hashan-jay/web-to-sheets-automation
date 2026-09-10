@@ -9,14 +9,21 @@ from src.sheets import (
     bank_clear_range,
     day_tab_candidates,
     index_sheet_ids,
+    ledger_skip_columns,
+    ledger_write_batches,
     ledger_write_plan,
+    locked_columns_in_rows,
+    looks_like_ledger_tab,
     new_rows_only,
     next_append_row,
+    next_unlocked_row,
     office_file_error,
+    parse_locked_blocks,
     protected_range_error,
     row_is_withdraw,
     uses_ledger_start,
     uses_locked_day_column,
+    writable_append_row,
 )
 
 
@@ -62,11 +69,16 @@ class SheetDedupeTests(unittest.TestCase):
         )
         self.assertIsInstance(locked, ConfigError)
         self.assertIn("Protect sheets and ranges", str(locked))
+        self.assertIn("row 105", str(locked))
         self.assertIsNone(protected_range_error(Exception("unrelated")))
 
     def test_september_ledger_starts_at_row_105(self) -> None:
         self.assertTrue(uses_ledger_start("GROUP U AUD SEPTEMBER 2026"))
         self.assertTrue(uses_ledger_start("Copy of GROUP D AUD SEPTEMBER 2026"))
+        self.assertTrue(uses_ledger_start("GROUP K AUD SEPTEMBER 2026"))
+        self.assertTrue(uses_ledger_start("Copy of GROUP W AUD SEPTEMBER 2026"))
+        self.assertTrue(uses_ledger_start("KABOOM Test AUD SEPTEMBER 2026"))
+        self.assertTrue(uses_locked_day_column("KABOOM Test AUD SEPTEMBER 2026"))
         self.assertFalse(uses_ledger_start("GROUP N DUMMY"))
         self.assertFalse(uses_ledger_start("GROUP D"))
         self.assertEqual(
@@ -79,8 +91,13 @@ class SheetDedupeTests(unittest.TestCase):
         self.assertEqual(next_append_row(junk_at_bottom, first_data_row=105), 105)
         self.assertEqual(next_append_row(["ID", "17110853300"], 1), 3)
         self.assertTrue(uses_locked_day_column("Copy of GROUP D AUD SEPTEMBER 2026"))
-        self.assertFalse(uses_locked_day_column("GROUP U AUD SEPTEMBER 2026"))
+        self.assertTrue(uses_locked_day_column("GROUP U AUD SEPTEMBER 2026"))
+        self.assertTrue(uses_locked_day_column("GROUP K AUD SEPTEMBER 2026"))
         self.assertFalse(uses_locked_day_column("GROUP N DUMMY"))
+        day_col = [""] * 103 + ["DAY"]
+        id_col = [""] * 103 + ["ID"]
+        self.assertTrue(looks_like_ledger_tab(day_col, id_col))
+        self.assertFalse(looks_like_ledger_tab(["DAY"], ["ID"]))
         range_name, values, start = ledger_write_plan(
             [["2", "2026-09-02", "ANZ", "Name", "10", "Deposit", "1", "FUCKFUCK", "", "A1", "", ""]],
             start=20,
@@ -100,6 +117,18 @@ class SheetDedupeTests(unittest.TestCase):
         self.assertEqual(dummy_start, 2)
         self.assertEqual(dummy_range, "A2:L2")
         self.assertEqual(dummy_values[0][0], "2")
+        skip = ledger_skip_columns(True, True)
+        batches, batch_start = ledger_write_batches(
+            [["10", "2026-09-10", "ANZ", "Name", "10", "Deposit", "9", "FUCKSPIN", "", "A1", "", ""]],
+            start=20,
+            skip_columns=skip,
+            first_data_row=105,
+        )
+        self.assertEqual(batch_start, 105)
+        self.assertEqual([item[0] for item in batches], ["B105:B105", "D105:L105"])
+        self.assertEqual(batches[0][1][0], ["2026-09-10"])
+        self.assertEqual(batches[1][1][0][0], "Name")
+        self.assertEqual(batches[1][1][0][3], "9")
 
     def test_withdrawals_start_at_row_1024(self) -> None:
         self.assertEqual(WITHDRAW_FIRST_DATA_ROW, 1024)
@@ -132,6 +161,49 @@ class SheetDedupeTests(unittest.TestCase):
     def test_bank_clear_range_skips_header(self) -> None:
         start, end = bank_clear_range(["ID", "17110853300", "17110853301"])
         self.assertEqual((start, end), (2, 3))
+
+    def test_skips_protected_cells_and_writes_after_the_lock(self) -> None:
+        metadata = {
+            "sheets": [
+                {
+                    "properties": {"sheetId": 10, "title": "10"},
+                    "protectedRanges": [
+                        {
+                            "range": {
+                                "sheetId": 10,
+                                "startRowIndex": 0,
+                                "endRowIndex": 1044,
+                                "startColumnIndex": 2,
+                                "endColumnIndex": 43,
+                            },
+                            "editors": {"users": ["owner@example.com"]},
+                        },
+                        {
+                            "range": {
+                                "sheetId": 10,
+                                "startColumnIndex": 0,
+                                "endColumnIndex": 1,
+                            },
+                            "editors": {"users": ["owner@example.com"]},
+                        },
+                    ],
+                }
+            ]
+        }
+        blocks = parse_locked_blocks(
+            metadata, 10, "sheets-writer@finance-automation-507106.iam.gserviceaccount.com"
+        )
+        self.assertEqual(locked_columns_in_rows(blocks, 105, 105) & {0, 2, 3, 6}, {0, 2, 3, 6})
+        self.assertEqual(next_unlocked_row(blocks, 105, last_row=1023), 1045)
+        self.assertEqual(
+            writable_append_row([""] * 110, blocks, first_data_row=105, last_data_row=1023),
+            1045,
+        )
+        writer_blocks = parse_locked_blocks(
+            metadata, 10, "owner@example.com"
+        )
+        self.assertEqual(writer_blocks, [])
+        self.assertEqual(next_unlocked_row(writer_blocks, 105, last_row=1023), 105)
 
 
 if __name__ == "__main__":
