@@ -1,7 +1,9 @@
 import unittest
 
 from src.deposit_bank import (
+    discover_bank_choices,
     extract_attachment_url,
+    lookup_attachment_url,
     match_sheet_bank,
     sheet_bank_choices,
     txn_attachment_url,
@@ -62,6 +64,46 @@ class DepositBankTests(unittest.TestCase):
         self.assertEqual(
             txn_attachment_url(txn, "https://site.example"),
             "https://site.example/files/proof.jpg",
+        )
+
+    def test_discover_bank_choices_reads_banks_sheet(self) -> None:
+        class FakeWs:
+            title = "10"
+
+            def col_values(self, _index):
+                return ["BANK", "ANZPLUS O'NEILL R W"]
+
+        class FakeBanks:
+            title = "Banks"
+
+            def get_all_values(self):
+                return [["BANK"], ["Bank ANZ Plus LEANNE MARY HUMPHREYS (ANZ PLUS)"]]
+
+        class FakeSpreadsheet:
+            def worksheets(self):
+                return [FakeWs(), FakeBanks()]
+
+            def fetch_sheet_metadata(self, _params):
+                return {}
+
+        class FakeSheet:
+            ws = FakeWs()
+            spreadsheet = FakeSpreadsheet()
+
+        self.assertIn(
+            "Bank ANZ Plus LEANNE MARY HUMPHREYS (ANZ PLUS)",
+            discover_bank_choices(FakeSheet()),
+        )
+
+    def test_lookup_attachment_url_keeps_existing(self) -> None:
+        txn = Transaction(
+            transaction_id="1",
+            status="DEPOSIT",
+            extras={"attachment": "https://cdn.example.com/a.jpg"},
+        )
+        self.assertEqual(
+            lookup_attachment_url(txn, None, "https://site.example"),
+            "https://cdn.example.com/a.jpg",
         )
 
 

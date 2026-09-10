@@ -798,7 +798,7 @@ class FinanceAutomationApp:
         ).pack(fill="x", pady=3)
         ttk.Label(
             sidebar,
-            text="Automated Run opens the dashboard, selects today's date, sets Status to COMPLETED, and scrapes every page into the GUI. When the box above is checked, new IDs are written to the Google Sheet. After each scrape it waits the seconds you set, then starts the next. Stop Automated Run ends the loop.",
+            text="Automated Run opens the dashboard, selects today's date, sets Status to COMPLETED, and scrapes every Completed deposit and withdrawal into the GUI. Deposit ATTACHMENT screenshots are read so the Google Sheet BANK column can be filled on those deposit rows. Withdrawals stay blank for manual BANK entry. When Send Extracted records is checked, new IDs are written to the Google Sheet. After each scrape it waits the seconds you set, then starts the next. Stop Automated Run ends the loop.",
             style="Muted.TLabel",
             wraplength=280,
         ).pack(anchor="w", pady=(4, 10))
@@ -1793,8 +1793,10 @@ class FinanceAutomationApp:
         self.status_text.set("Automated run: scraping Completed")
         self._append_log(
             "Automated Run started. The browser will select the date, set Status "
-            "to COMPLETED, read every page into the GUI, and send new IDs to the Google Sheet. "
-            f"The next scrape waits {seconds}s after this one finishes."
+            "to COMPLETED, read every Completed deposit and withdrawal into the GUI, "
+            "and send new IDs to the Google Sheet. Deposit ATTACHMENT screenshots "
+            "are used to fill BANK on deposit rows."
+            f" The next scrape waits {seconds}s after this one finishes."
         )
         self._auto_tick()
 
@@ -1854,6 +1856,11 @@ class FinanceAutomationApp:
         self._append_log(
             f"Automated Run tick: selecting date {self._scrape_date()}, Status COMPLETED, "
             f"and scraping every page on {normalize_dashboard_url(self.login_website.get())}."
+            + (
+                " Deposit ATTACHMENT screenshots will fill BANK on new deposit rows."
+                if write_sheet
+                else ""
+            )
             + (
                 " New extracted records will be sent to the Google Sheet one by one."
                 if write_sheet

@@ -225,7 +225,9 @@ def _path(name: str, default: str) -> Path:
 
 
 def _csv_tuple(raw: str) -> tuple[str, ...]:
-    return tuple(part.strip() for part in str(raw or "").split(",") if part.strip())
+    text = str(raw or "")
+    sep = "|" if "|" in text else ","
+    return tuple(part.strip() for part in text.split(sep) if part.strip())
 
 
 def _aliases(raw: str) -> dict[str, str]:

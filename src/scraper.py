@@ -485,18 +485,34 @@ EXTRACT_CARDS_JS = r"""
     const processed = actionText.match(/PROCESSED\s+(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})/i);
     if (created) data.created = created[1];
     if (processed) data.processed = processed[1];
-    const attachEl = Array.from(tr.querySelectorAll("a, button, span")).find((el) =>
-      /attachment/i.test((el.textContent || "") + " " + (el.getAttribute("href") || ""))
+    const attachEl = Array.from(tr.querySelectorAll("a, button, span, img")).find((el) =>
+      /attachment|receipt|proof|slip/i.test(
+        (el.textContent || "") + " " + (el.getAttribute("href") || "") + " " +
+        (el.getAttribute("src") || "") + " " + (el.getAttribute("title") || "") + " " +
+        (el.getAttribute("onclick") || "")
+      )
     );
     if (attachEl) {
-      const onclick = attachEl.getAttribute("onclick") || "";
-      const fromClick = onclick.match(/https?:\/\/[^'"\s]+|\/[^'"\s]+\.(?:png|jpe?g|webp|gif|bmp|pdf)/i);
+      const blob = [
+        attachEl.getAttribute("onclick") || "",
+        attachEl.getAttribute("href") || "",
+        attachEl.getAttribute("data-url") || "",
+        attachEl.getAttribute("data-src") || "",
+        attachEl.getAttribute("data-file") || "",
+        attachEl.getAttribute("data-attachment") || "",
+        attachEl.getAttribute("src") || "",
+        attachEl.href || "",
+      ].join(" ");
+      const fromClick = blob.match(/https?:\/\/[^'"\s)]+|\/[^'"\s)]+\.(?:png|jpe?g|webp|gif|bmp|pdf)/i);
       data.attachment = (fromClick && fromClick[0])
         || attachEl.getAttribute("href")
         || attachEl.getAttribute("data-url")
-        || attachEl.getAttribute("data-src")
-        || attachEl.href
+        || attachEl.getAttribute("src")
         || "";
+    }
+    if (!data.attachment) {
+      const img = tr.querySelector("img[src]");
+      if (img) data.attachment = img.getAttribute("src") || "";
     }
     return data;
   }).filter((row) => row.transaction_id);

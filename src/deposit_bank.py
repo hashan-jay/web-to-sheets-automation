@@ -85,6 +85,31 @@ def sheet_bank_choices(settings: Settings | None) -> tuple[str, ...]:
     return tuple(unique)
 
 
+_GENERIC_BANK_TOKENS = {
+    "THE",
+    "AND",
+    "OF",
+    "BANK",
+    "LIMITED",
+    "AUSTRALIA",
+    "NATIONAL",
+    "FIRST",
+    "PTY",
+    "LTD",
+    "PLUS",
+    "MANUAL",
+    "GATEWAY",
+}
+
+
+def _distinctive_tokens(value: object) -> list[str]:
+    return [
+        part
+        for part in _tokens(value)
+        if len(part) > 2 and part not in _GENERIC_BANK_TOKENS
+    ]
+
+
 def match_sheet_bank(text: object, choices: tuple[str, ...] | list[str]) -> str:
     """Return the dropdown label whose parts all appear in the screenshot text."""
     hay = _norm(text)
@@ -98,11 +123,28 @@ def match_sheet_bank(text: object, choices: tuple[str, ...] | list[str]) -> str:
     best = ""
     best_score = 0
     for choice in ranked:
+        distinctive = _distinctive_tokens(choice)
+        if not distinctive:
+            continue
+        score = sum(1 for part in distinctive if part in hay)
+        need = 2 if len(distinctive) >= 2 else 1
+        name_hits = [part for part in distinctive if len(part) >= 4 and part in hay]
+        if score >= need and name_hits and score > best_score:
+            best = choice
+            best_score = score
+    if best:
+        return best
+    for choice in ranked:
         parts = [part for part in _tokens(choice) if len(part) > 2]
         if not parts:
             continue
         score = sum(1 for part in parts if part in hay)
-        if score >= max(2, (len(parts) + 1) // 2) and score > best_score:
+        name_hits = [
+            part
+            for part in parts
+            if len(part) > 3 and part not in _GENERIC_BANK_TOKENS and part in hay
+        ]
+        if score >= max(2, (len(parts) + 1) // 2) and name_hits and score > best_score:
             best = choice
             best_score = score
     return best
@@ -202,6 +244,14 @@ def fill_deposit_banks(
     """
     accounts = tuple(choices or sheet_bank_choices(settings))
     if not accounts:
+        _emit(
+            on_event,
+            kind="log",
+            message=(
+                "No Google Sheet BANK dropdown values were found, so deposit "
+                "ATTACHMENT matching cannot fill BANK."
+            ),
+        )
         return 0
     host = (origin or "").rstrip("/")
     if not host:
@@ -287,7 +337,7 @@ def resolve_deposit_bank(
     already = str(extras.get("sheet_bank") or "").strip()
     if already:
         return already
-    url = txn_attachment_url(txn, origin)
+    url = lookup_attachment_url(txn, session, origin)
     if not url:
         return ""
     store = cache if cache is not None else {}
@@ -297,6 +347,40 @@ def resolve_deposit_bank(
     bank = match_sheet_bank(text, choices)
     store[url] = bank
     return bank
+
+
+_DETAIL_PATHS = (
+    "/transactions/getTransaction",
+    "/transactions/getTransactionById",
+    "/transactions/get",
+    "/transactions/detail",
+    "/transaction/get",
+)
+
+
+def lookup_attachment_url(txn: Transaction, session=None, origin: str = "") -> str:
+    url = txn_attachment_url(txn, origin)
+    if url:
+        return url
+    host = (origin or "").rstrip("/")
+    txn_id = str(txn.transaction_id or "").strip()
+    if session is None or not host or not txn_id:
+        return ""
+    payload = {"id": txn_id, "transactionId": txn_id}
+    for path in _DETAIL_PATHS:
+        try:
+            response = session.post(host + path, data=payload, timeout=8)
+            raw = response.json()
+        except Exception:
+            continue
+        found = extract_attachment_url(raw, host)
+        if found:
+            extras = dict(txn.extras or {})
+            extras["attachment"] = found
+            txn.extras = extras
+            txn.attachment = found
+            return found
+    return ""
 
 
 def read_attachment_text(url: str, session=None) -> str:
@@ -420,32 +504,48 @@ def _ocr_windows(body: bytes) -> str:
         Path(path).unlink(missing_ok=True)
 
 
+_BANK_HEADER = {"BANK", "BANK ACCOUNT", "DAY", "ACCOUNT", "ACCOUNT NAME"}
+
+
 def discover_bank_choices(sheet) -> tuple[str, ...]:
     """Learn BANK dropdown labels from the open spreadsheet when possible."""
     found: list[str] = []
+    spreadsheet = getattr(sheet, "spreadsheet", None)
+    ws = getattr(sheet, "ws", None)
+    current_title = str(getattr(ws, "title", "") or "").strip().lower()
     try:
-        ws = getattr(sheet, "ws", None)
         if ws is not None:
-            for value in ws.col_values(3)[:80]:
-                text = str(value or "").strip()
-                if text and text.upper() not in {"BANK", "BANK ACCOUNT", "DAY"}:
-                    found.append(text)
+            found.extend(_clean_bank_labels(ws.col_values(3)[:400]))
+            found.extend(_validation_bank_labels(spreadsheet, ws))
     except Exception:
         pass
     try:
-        spreadsheet = getattr(sheet, "spreadsheet", None)
         if spreadsheet is not None:
             for worksheet in spreadsheet.worksheets():
                 title = str(worksheet.title or "").strip().lower()
-                if title not in {"banks", "bank", "dropdown", "dropdowns"}:
-                    continue
-                for row in worksheet.get_all_values()[:80]:
-                    for cell in row:
-                        text = str(cell or "").strip()
-                        if text and text.upper() not in {"BANK", "BANK ACCOUNT"}:
-                            found.append(text)
+                if title in {"banks", "bank", "dropdown", "dropdowns", "bank accounts"}:
+                    for row in worksheet.get_all_values()[:400]:
+                        found.extend(_clean_bank_labels(row))
     except Exception:
         pass
+    unique = _unique_bank_labels(found)
+    if len(unique) >= 2 or spreadsheet is None:
+        return unique
+    try:
+        for worksheet in spreadsheet.worksheets():
+            title = str(worksheet.title or "").strip().lower()
+            if not title.isdigit() or title == current_title:
+                continue
+            try:
+                found.extend(_clean_bank_labels(worksheet.col_values(3)[:200]))
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return _unique_bank_labels(found)
+
+
+def _unique_bank_labels(found: list[str]) -> tuple[str, ...]:
     seen: set[str] = set()
     unique: list[str] = []
     for item in found:
@@ -455,3 +555,67 @@ def discover_bank_choices(sheet) -> tuple[str, ...]:
         seen.add(key)
         unique.append(item)
     return tuple(unique)
+
+
+def _clean_bank_labels(values: list | tuple) -> list[str]:
+    labels: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if text and text.upper() not in _BANK_HEADER:
+            labels.append(text)
+    return labels
+
+
+def _validation_bank_labels(spreadsheet, worksheet) -> list[str]:
+    if spreadsheet is None or worksheet is None:
+        return []
+    title = str(getattr(worksheet, "title", "") or "").strip()
+    if not title:
+        return []
+    try:
+        meta = spreadsheet.fetch_sheet_metadata(
+            {
+                "includeGridData": True,
+                "ranges": [f"'{title}'!C105:C105"],
+            }
+        )
+    except Exception:
+        return []
+    for block in (meta.get("sheets") or []) if isinstance(meta, dict) else []:
+        for data in block.get("data") or []:
+            for row in data.get("rowData") or []:
+                for cell in row.get("values") or []:
+                    condition = ((cell.get("dataValidation") or {}).get("condition") or {})
+                    kind = str(condition.get("type") or "")
+                    values = condition.get("values") or []
+                    if kind == "ONE_OF_LIST":
+                        return _clean_bank_labels(
+                            item.get("userEnteredValue")
+                            for item in values
+                            if isinstance(item, dict)
+                        )
+                    if kind == "ONE_OF_RANGE" and values:
+                        formula = str(values[0].get("userEnteredValue") or "")
+                        return _labels_from_range_formula(spreadsheet, formula)
+    return []
+
+
+def _labels_from_range_formula(spreadsheet, formula: str) -> list[str]:
+    text = str(formula or "").strip().lstrip("=")
+    match = re.match(
+        r"'?([^'!]+)'?!\$?([A-Za-z]+)\$?(\d+):\$?([A-Za-z]+)\$?(\d+)",
+        text,
+    )
+    if not match:
+        return []
+    title, col1, row1, col2, row2 = match.groups()
+    a1 = f"'{title}'!{col1}{row1}:{col2}{row2}"
+    try:
+        raw = spreadsheet.values_get(a1)
+        rows = raw.get("values") if isinstance(raw, dict) else raw
+    except Exception:
+        return []
+    found: list[str] = []
+    for row in rows or []:
+        found.extend(_clean_bank_labels(row if isinstance(row, (list, tuple)) else [row]))
+    return found
