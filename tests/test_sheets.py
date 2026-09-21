@@ -171,6 +171,9 @@ class SheetDedupeTests(unittest.TestCase):
         self.assertEqual(start, 1024)
         self.assertEqual(range_name, "A1024:L1024")
         self.assertTrue(row_is_withdraw(values[0]))
+        self.assertTrue(
+            row_is_withdraw(["9", "2026-09-09", "", "Name", "-10", "Withdraw", "2"])
+        )
         self.assertFalse(
             row_is_withdraw(["9", "2026-09-09", "", "Name", "10", "Deposit", "1"])
         )
@@ -211,10 +214,10 @@ class SheetDedupeTests(unittest.TestCase):
             metadata, 10, "sheets-writer@finance-automation-507106.iam.gserviceaccount.com"
         )
         self.assertEqual(locked_columns_in_rows(blocks, 105, 105) & {0, 2, 3, 6}, {0, 2, 3, 6})
-        self.assertEqual(next_unlocked_row(blocks, 105, last_row=1023), 1045)
+        self.assertEqual(next_unlocked_row(blocks, 105, last_row=1023), 0)
         self.assertEqual(
             writable_append_row([""] * 110, blocks, first_data_row=105, last_data_row=1023),
-            1045,
+            105,
         )
         writer_blocks = parse_locked_blocks(
             metadata, 10, "owner@example.com"

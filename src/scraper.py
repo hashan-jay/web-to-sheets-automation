@@ -24,11 +24,14 @@ from src.models import Transaction
 from src.tally import (
     COMPLETED_STATUS,
     estimated_pages,
+    format_amount,
     pager_finished,
     local_today,
     pager_bounds,
     pager_last_from_hrefs,
+    parse_amount,
     parse_website_summary,
+    staff_scrape_types,
 )
 
 EXTRACT_SUMMARY_JS = r"""
@@ -57,6 +60,36 @@ SET_STATUS_JS = r"""
       String(item.text || "").toUpperCase().includes(wanted) ||
       String(item.value || "").toUpperCase().includes(wanted)
     );
+    if (!opt) continue;
+    sel.value = opt.value;
+    sel.dispatchEvent(new Event("input", { bubbles: true }));
+    sel.dispatchEvent(new Event("change", { bubbles: true }));
+    return opt.value;
+  }
+  return "";
+}
+"""
+
+SET_TYPE_JS = r"""
+(value) => {
+  const wanted = String(value || "").toUpperCase().replace(/[_-]+/g, " ").trim();
+  const compact = wanted.replace(/\s+/g, "");
+  if (!compact) return "";
+  const selects = Array.from(document.querySelectorAll("select"));
+  for (const sel of selects) {
+    const label = ((sel.name || "") + " " + (sel.id || "") + " " +
+      (sel.getAttribute("aria-label") || "") + " " +
+      (sel.previousElementSibling && sel.previousElementSibling.innerText || "") + " " +
+      (sel.parentElement && sel.parentElement.innerText || "")).toUpperCase();
+    if (!label.includes("TYPE") || label.includes("STATUS")) continue;
+    const opt = Array.from(sel.options).find((item) => {
+      const text = String(item.text || "").toUpperCase().replace(/[_-]+/g, " ");
+      const val = String(item.value || "").toUpperCase().replace(/[_-]+/g, " ");
+      const tCompact = text.replace(/\s+/g, "");
+      const vCompact = val.replace(/\s+/g, "");
+      return tCompact === compact || vCompact === compact ||
+        text.includes(wanted) || val.includes(wanted);
+    });
     if (!opt) continue;
     sel.value = opt.value;
     sel.dispatchEvent(new Event("input", { bubbles: true }));
@@ -437,7 +470,7 @@ EXTRACT_CARDS_JS = r"""
     const data = { transaction_id: (tr.getAttribute("data-id") || "").trim() };
     const type = tr.querySelector("div.type");
     if (type) data.status = type.textContent.trim().toUpperCase();
-    const skipBrand = /^(COPY|NETLOSS|DEPOSIT|WITHDRAW|WITHDRAWAL|UNCLAIM|MANUAL|CREATED|PROCESSED)$/i;
+    const skipBrand = /^(COPY|NETLOSS|DEPOSIT|WITHDRAW|WITHDRAWAL|STAFF|STAFF DEPOSIT|STAFF WITHDRAW|STAFFDEPOSIT|STAFFWITHDRAW|UNCLAIM|MANUAL|CREATED|PROCESSED)$/i;
     const isBrandPill = (value) => {
       const text = String(value || "").trim();
       if (text.length < 3 || text.length > 40) return false;
@@ -871,24 +904,43 @@ def _select_filter_dates(page: Page, day: str, end: str, on_event=None) -> None:
         )
 
 
-def _apply_filters(page: Page, settings: Settings, on_event=None) -> None:
+def _set_type_filter(page: Page, tx_type: str) -> str:
+    wanted = (tx_type or "").strip()
+    if not wanted:
+        return ""
+    selected = ""
+    try:
+        selected = str(page.evaluate(SET_TYPE_JS, wanted) or "")
+    except Exception:
+        selected = ""
+    if not selected:
+        _select_labeled(page, "Type", wanted)
+        selected = wanted
+    return selected
+
+
+def _apply_filters(page: Page, settings: Settings, on_event=None, tx_type: str = "") -> None:
     status = (settings.filter_status or COMPLETED_STATUS).strip() or COMPLETED_STATUS
     if status.upper() == "ANY":
         status = COMPLETED_STATUS
     day = settings.filter_date_from.strip() or local_today()
     end = settings.filter_date_to.strip() or day
+    chosen_type = (tx_type or "").strip()
     _select_labeled(page, "Status", status)
     try:
         page.evaluate(SET_STATUS_JS, status)
     except Exception:
         pass
+    if chosen_type:
+        _set_type_filter(page, chosen_type)
     _select_filter_dates(page, day, end, on_event=on_event)
     if on_event:
         on_event(
             {
                 "kind": "log",
                 "message": (
-                    f"Website filters set to Status {status} · date {day}"
+                    f"Website filters set to Type {chosen_type or 'STAFF DEPOSIT + STAFF WITHDRAW'} "
+                    f"· Status {status} · date {day}"
                     + (f" to {end}" if end and end != day else "")
                     + ". Searching every Completed page."
                 ),
@@ -1303,88 +1355,127 @@ def scrape_transactions(
             "or paste DASHBOARD_URL in .env."
         )
 
-    def _scrape_with(browser, context, page, close_browser: bool) -> None:
-        try:
-            _apply_filters(page, settings, on_event=on_event)
-            summary = _page_summary(page)
-            capture.website_records = int(summary.get("records") or 0)
-            capture.website_total = str(summary.get("total") or "")
-            state = _pager_state(page)
-            per_page = max(len(_page_ids(page)), 1)
-            last_page = max(
-                int(state.get("last") or 0),
-                estimated_pages(int(capture.website_records or 0), per_page),
+    types = staff_scrape_types(settings.filter_type)
+
+    def _read_type_pages(page, tx_type: str) -> tuple[int, str]:
+        before = len(collected)
+        _apply_filters(page, settings, on_event=on_event, tx_type=tx_type)
+        summary = _page_summary(page)
+        type_records = int(summary.get("records") or 0)
+        type_total = str(summary.get("total") or "")
+        state = _pager_state(page)
+        per_page = max(len(_page_ids(page)), 1)
+        last_page = max(
+            int(state.get("last") or 0),
+            estimated_pages(type_records, per_page),
+        )
+        if last_page:
+            page_limit = last_page
+        elif once:
+            page_limit = 1
+        else:
+            page_limit = max(settings.max_pages, 80)
+        _goto_page(page, 1)
+        if on_event:
+            on_event(
+                {
+                    "kind": "log",
+                    "message": (
+                        f"Type {tx_type} · Status COMPLETED shows Record: "
+                        f"{type_records or '?'} · about {per_page} per page · "
+                        f"{last_page or '?'} page(s). "
+                        + (
+                            "Reading this Type once, then the next Type."
+                            if once
+                            else "Reading every page so the GUI count can match."
+                        )
+                    ),
+                }
             )
-            if last_page:
-                page_limit = last_page
-            elif once:
-                page_limit = 1
-            else:
-                page_limit = max(settings.max_pages, 80)
-            _goto_page(page, 1)
+
+        for page_num in range(1, page_limit + 1):
+            raw_cards = page.evaluate(EXTRACT_CARDS_JS)
+            for raw in raw_cards:
+                txn = _to_transaction(raw)
+                if not txn.status:
+                    txn.status = tx_type
+                if txn.transaction_id:
+                    collected[txn.transaction_id] = txn
+            state = _pager_state(page)
+            current_page = int(state.get("current") or page_num)
+            pager_last = int(state.get("last") or 0)
+            last_page = max(
+                pager_last,
+                last_page,
+                estimated_pages(type_records, per_page),
+            )
+            scraped_this_type = len(collected) - before
             if on_event:
                 on_event(
                     {
                         "kind": "log",
                         "message": (
-                            f"Completed list shows Record: {capture.website_records or '?'} "
-                            f"· about {per_page} per page · {last_page or '?'} page(s). "
-                            + (
-                                "Reading Completed once, then stopping."
-                                if once
-                                else "Reading every page so today's GUI count can match."
-                            )
+                            f"{tx_type} page {current_page}/{last_page or '?'} · "
+                            f"{scraped_this_type} unique of {type_records or '?'} "
+                            "Completed records."
                         ),
                     }
                 )
-
-            for page_num in range(1, page_limit + 1):
-                raw_cards = page.evaluate(EXTRACT_CARDS_JS)
-                for raw in raw_cards:
-                    txn = _to_transaction(raw)
-                    if txn.transaction_id:
-                        collected[txn.transaction_id] = txn
-                state = _pager_state(page)
-                current_page = int(state.get("current") or page_num)
-                pager_last = int(state.get("last") or 0)
-                last_page = max(
-                    pager_last,
-                    last_page,
-                    estimated_pages(int(capture.website_records or 0), per_page),
-                )
+            if limit and len(collected) >= limit:
+                break
+            if type_records and scraped_this_type >= type_records:
+                break
+            if pager_finished(current_page, pager_last or last_page):
                 if on_event:
                     on_event(
                         {
                             "kind": "log",
                             "message": (
-                                f"Page {current_page}/{last_page or '?'} · "
-                                f"{len(collected)} unique of "
-                                f"{capture.website_records or '?'} Completed records."
+                                f"Reached the last {tx_type} Completed page."
                             ),
                         }
                     )
-                if limit and len(collected) >= limit:
-                    break
-                if capture.website_records and len(collected) >= capture.website_records:
-                    break
-                if pager_finished(current_page, pager_last or last_page):
-                    if on_event:
-                        on_event(
-                            {
-                                "kind": "log",
-                                "message": "Reached the last Completed page. Stopping this scrape.",
-                            }
-                        )
-                    break
-                next_page = page_num + 1
-                if pager_last and next_page > pager_last:
-                    break
-                advanced = _goto_page(page, next_page)
-                if not advanced:
-                    advanced = _goto_next_page(page)
-                if not advanced:
-                    break
+                break
+            next_page = page_num + 1
+            if pager_last and next_page > pager_last:
+                break
+            advanced = _goto_page(page, next_page)
+            if not advanced:
+                advanced = _goto_next_page(page)
+            if not advanced:
+                break
+        return type_records, type_total
 
+    def _scrape_with(browser, context, page, close_browser: bool) -> None:
+        try:
+            record_parts: list[int] = []
+            amount_parts: list[str] = []
+            for tx_type in types:
+                type_records, type_total = _read_type_pages(page, tx_type)
+                record_parts.append(type_records)
+                if type_total:
+                    amount_parts.append(type_total)
+            capture.website_records = sum(record_parts)
+            if amount_parts:
+                capture.website_total = format_amount(
+                    sum(parse_amount(item) for item in amount_parts)
+                )
+            if on_event:
+                on_event(
+                    {
+                        "kind": "log",
+                        "message": (
+                            "Website Completed Record after STAFF DEPOSIT + "
+                            f"STAFF WITHDRAW filters: {capture.website_records or '?'} "
+                            + (
+                                f"· Total {capture.website_total}"
+                                if capture.website_total
+                                else ""
+                            )
+                            + f" · scraped {len(collected)} unique row(s)."
+                        ),
+                    }
+                )
             if _on_transactions_page(page):
                 context.storage_state(path=str(settings.auth_state_path))
         finally:

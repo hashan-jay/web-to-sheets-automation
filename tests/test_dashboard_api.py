@@ -29,7 +29,7 @@ def _settings(**overrides) -> Settings:
         "manual_login_seconds": 0,
         "filter_date_from": "2026-09-08",
         "filter_date_to": "2026-09-08",
-        "filter_type": "ACTIVE",
+        "filter_type": "STAFF DEPOSIT",
         "filter_status": COMPLETED_STATUS,
         "google_sheet_id": "",
         "google_worksheet": "",
@@ -84,7 +84,14 @@ class DashboardApiTests(unittest.TestCase):
         self.assertEqual(payload["pageIndex"], "2")
         self.assertEqual(payload["includeAdmin"], "1")
         self.assertEqual(payload["status"], "COMPLETED")
-        self.assertEqual(payload["type"], "ACTIVE")
+        self.assertEqual(payload["type"], "STAFF DEPOSIT")
+        both = list_filter_payload(_settings(filter_type="STAFF DEPOSIT,STAFF WITHDRAW"), 0)
+        self.assertEqual(both["type"], "STAFF DEPOSIT")
+        withdraw = list_filter_payload(
+            _settings(filter_type="STAFF WITHDRAW"), 0, tx_type="STAFF WITHDRAW"
+        )
+        self.assertEqual(withdraw["type"], "STAFF WITHDRAW")
+        self.assertEqual(withdraw["status"], "COMPLETED")
         self.assertEqual(payload["sDate"], "2026-09-08 00:00:00")
         self.assertEqual(payload["eDate"], "2026-09-08 23:59:59")
 
@@ -101,6 +108,11 @@ class DashboardApiTests(unittest.TestCase):
         self.assertEqual(txn.pay_id, "61414769587")
         self.assertEqual(txn.bank_lock, "1")
         self.assertEqual(txn.status, "WITHDRAW")
+        staff_row = dict(SAMPLE_ROW)
+        staff_row["type"] = "STAFF WITHDRAW"
+        staff_row["id"] = 17120000002
+        staff = transaction_from_api(staff_row)
+        self.assertEqual(staff.status, "STAFF WITHDRAW")
         self.assertEqual(txn.created, "2026-08-29 10:44")
         self.assertEqual(txn.processed, "2026-08-29 10:44")
         self.assertEqual(txn.brand, "FUCKFUCKVIPC")
@@ -249,6 +261,55 @@ class DashboardApiTests(unittest.TestCase):
         self.assertEqual(
             [txn.transaction_id for txn in capture.transactions],
             ["17113600239", "17113786958"],
+        )
+
+    def test_fetch_completed_merges_staff_deposit_and_withdraw(self) -> None:
+        pages = {
+            ("STAFF DEPOSIT", 0): {
+                "transactions": [
+                    {
+                        "id": "17120000010",
+                        "type": "STAFF DEPOSIT",
+                        "cash": 40,
+                        "createdDateTime": "2026-09-21 09:00:00",
+                        "user": {"username": "A1", "name": "Ann", "bank": "{}"},
+                    }
+                ],
+                "totalCount": 1,
+                "totalPage": 1,
+                "totalAmount": 40,
+            },
+            ("STAFF WITHDRAW", 0): {
+                "transactions": [
+                    {
+                        "id": "17120000011",
+                        "type": "STAFF WITHDRAW",
+                        "cash": 15,
+                        "createdDateTime": "2026-09-21 10:00:00",
+                        "user": {"username": "A2", "name": "Ben", "bank": "{}"},
+                    }
+                ],
+                "totalCount": 1,
+                "totalPage": 1,
+                "totalAmount": 15,
+            },
+        }
+        calls: list[tuple[str, int]] = []
+
+        def post(_path: str, data: dict[str, str]):
+            key = (data["type"], int(data["pageIndex"]))
+            calls.append(key)
+            return pages[key]
+
+        capture = fetch_completed(
+            post, _settings(filter_type="STAFF DEPOSIT,STAFF WITHDRAW"), max_pages=20
+        )
+        self.assertIsNotNone(capture)
+        self.assertEqual(calls, [("STAFF DEPOSIT", 0), ("STAFF WITHDRAW", 0)])
+        self.assertEqual(capture.website_records, 2)
+        self.assertEqual(
+            {txn.transaction_id for txn in capture.transactions},
+            {"17120000010", "17120000011"},
         )
 
     def test_fetch_completed_rejects_html(self) -> None:

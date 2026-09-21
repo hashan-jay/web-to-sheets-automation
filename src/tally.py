@@ -9,6 +9,9 @@ SENT_STATUSES = {"Copied", "Skipped"}
 RECORD_RE = re.compile(r"Record:\s*(-?\d+)", re.I)
 TOTAL_RE = re.compile(r"Total:\s*(-?[\d,.]+)", re.I)
 COMPLETED_STATUS = "COMPLETED"
+STAFF_DEPOSIT_TYPE = "STAFF DEPOSIT"
+STAFF_WITHDRAW_TYPE = "STAFF WITHDRAW"
+STAFF_TX_TYPES = (STAFF_DEPOSIT_TYPE, STAFF_WITHDRAW_TYPE)
 
 
 def local_today() -> str:
@@ -66,11 +69,39 @@ def format_amount(value: float) -> str:
     return f"{value:,.2f}"
 
 
+def normalize_tx_type(raw: object) -> str:
+    return " ".join(
+        str(raw or "").strip().upper().replace("_", " ").replace("-", " ").split()
+    )
+
+
+def is_withdraw_type(raw: object) -> bool:
+    return "WITHDRAW" in normalize_tx_type(raw)
+
+
+def is_staff_tx_type(raw: object) -> bool:
+    key = normalize_tx_type(raw)
+    if key in STAFF_TX_TYPES:
+        return True
+    return key.startswith("STAFF") and ("DEPOSIT" in key or "WITHDRAW" in key)
+
+
 def txn_kind(raw: object) -> str:
-    key = str(raw or "").strip().upper()
-    if key.startswith("WITHDRAW"):
-        return "withdraw"
-    return "deposit"
+    return "withdraw" if is_withdraw_type(raw) else "deposit"
+
+
+def staff_scrape_types(filter_type: str = "") -> list[str]:
+    """STAFF DEPOSIT and/or STAFF WITHDRAW. ACTIVE/blank means both."""
+    key = normalize_tx_type(filter_type)
+    compact = key.replace(",", " ").replace(" ", "")
+    if not compact or compact in {"ACTIVE", "ALL", "BOTH", "STAFF"}:
+        return list(STAFF_TX_TYPES)
+    wanted: list[str] = []
+    if "STAFFDEPOSIT" in compact or compact == "DEPOSIT":
+        wanted.append(STAFF_DEPOSIT_TYPE)
+    if "STAFFWITHDRAW" in compact or compact in {"WITHDRAW", "WITHDRAWAL"}:
+        wanted.append(STAFF_WITHDRAW_TYPE)
+    return wanted or list(STAFF_TX_TYPES)
 
 
 def copy_group(status: object) -> str:

@@ -316,7 +316,7 @@ class Settings:
             manual_login_seconds=_int("MANUAL_LOGIN_SECONDS", 0),
             filter_date_from=os.getenv("FILTER_DATE_FROM", "").strip(),
             filter_date_to=os.getenv("FILTER_DATE_TO", "").strip(),
-            filter_type=os.getenv("FILTER_TYPE", "ACTIVE").strip(),
+            filter_type=os.getenv("FILTER_TYPE", "STAFF DEPOSIT,STAFF WITHDRAW").strip(),
             filter_status=os.getenv("FILTER_STATUS", "COMPLETED").strip(),
             google_sheet_id=normalize_google_sheet_id(os.getenv("GOOGLE_SHEET_ID", "")),
             google_worksheet=os.getenv("GOOGLE_WORKSHEET", "").strip(),

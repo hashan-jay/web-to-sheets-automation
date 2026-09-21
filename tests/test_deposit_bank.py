@@ -46,6 +46,14 @@ class DepositBankTests(unittest.TestCase):
         )
         self.assertEqual(sheet_bank(withdraw, settings), "")
         self.assertEqual(to_sheet_row(withdraw, settings)[2], "")
+        staff_withdraw = Transaction(
+            transaction_id="10",
+            status="STAFF WITHDRAW",
+            extras={"sheet_bank": "ANZPLUS O'NEILL R W"},
+        )
+        self.assertEqual(sheet_bank(staff_withdraw, settings), "")
+        self.assertEqual(to_sheet_row(staff_withdraw, settings)[2], "")
+        self.assertEqual(to_sheet_row(staff_withdraw, settings)[5], "Withdraw")
 
     def test_sheet_bank_choices_include_default(self) -> None:
         settings = _settings()

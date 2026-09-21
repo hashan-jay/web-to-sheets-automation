@@ -209,7 +209,7 @@ def next_unlocked_row(
     while row < UNBOUNDED_ROW:
         end = row + max(int(n_rows), 1) - 1
         if last_row and row > last_row:
-            return next_unlocked_row(blocks, last_row + 1, n_rows, 0, required)
+            return 0
         locked = locked_columns_in_rows(blocks, row, end)
         if not (needed & locked):
             return row
@@ -229,27 +229,19 @@ def writable_append_row(
     last_data_row: int = 0,
     required: tuple[int, ...] = REQUIRED_WRITE_COLS,
 ) -> int:
-    """First empty ID row whose required cells are unlocked."""
+    """First empty ID row in this deposit or withdrawal block."""
     row = max(int(first_data_row or 1), 1)
     cap = int(last_data_row or 0)
-    beyond = False
     while row < UNBOUNDED_ROW:
         if cap and row > cap:
-            if beyond:
-                return 0
-            beyond = True
-            cap = 0
-            continue
+            return 0
         value = id_col[row - 1] if row <= len(id_col) else ""
         if str(value).strip().isdigit():
             row += 1
             continue
         unlocked = next_unlocked_row(blocks, row, n_rows, cap, required)
-        if not unlocked:
-            return 0
-        if unlocked != row:
-            row = unlocked
-            continue
+        if unlocked:
+            return unlocked
         return row
     return 0
 
@@ -313,13 +305,9 @@ class SheetClient:
             self.spreadsheet = client.open_by_key(sheet_id)
             self.sheet_id = sheet_id
             self.slot = 0
-            self._ledger_start = (
-                LEDGER_FIRST_DATA_ROW if uses_ledger_start(self.spreadsheet.title) else 0
-            )
-            self._skip_day_column = uses_locked_day_column(self.spreadsheet.title)
-            self._skip_bank_column = self._skip_day_column
-            if self._skip_day_column:
-                self._ledger_start = LEDGER_FIRST_DATA_ROW
+            self._ledger_start = LEDGER_FIRST_DATA_ROW
+            self._skip_day_column = True
+            self._skip_bank_column = False
             self.last_write_start = 0
             self._fallback_title = (worksheet or "").strip()
             self._writer_email = service_account_email(Path(credentials_path))
@@ -355,28 +343,12 @@ class SheetClient:
         return self.ws
 
     def _apply_title_layout(self) -> None:
-        if uses_ledger_start(self.spreadsheet.title) or uses_locked_day_column(
-            self.spreadsheet.title
-        ):
-            self._ledger_start = LEDGER_FIRST_DATA_ROW
-            self._skip_day_column = True
-            self._skip_bank_column = True
-
-    def _apply_tab_layout(self) -> None:
-        """Treat day tabs with the September ledger header as locked ledgers."""
-        self._apply_title_layout()
-        if self._ledger_start and self._skip_day_column:
-            return
-        try:
-            ids = self.ws.col_values(7)
-            days = self.ws.col_values(1)
-        except Exception:
-            return
-        if not looks_like_ledger_tab(days, ids):
-            return
         self._ledger_start = LEDGER_FIRST_DATA_ROW
         self._skip_day_column = True
-        self._skip_bank_column = True
+
+    def _apply_tab_layout(self) -> None:
+        """Every date tab uses deposits from row 105 and withdrawals from 1024."""
+        self._apply_title_layout()
 
     def tab_title(self) -> str:
         return self.ws.title
@@ -401,7 +373,6 @@ class SheetClient:
     def next_empty_row(self, *, withdraw: bool = False, n_rows: int = 1) -> int:
         ids = self.ws.col_values(7)
         blocks = self._protected_blocks()
-        last_deposit = WITHDRAW_FIRST_DATA_ROW - 1
         if withdraw:
             return writable_append_row(
                 ids,
@@ -409,16 +380,12 @@ class SheetClient:
                 first_data_row=WITHDRAW_FIRST_DATA_ROW,
                 n_rows=n_rows,
             )
-        days = self.ws.col_values(1) if not self._ledger_start else []
-        start_at = self._ledger_start or header_locked_data_row(days, ids)
-        if not start_at:
-            start_at = next_append_row(ids, last_data_row=last_deposit) or 2
         return writable_append_row(
             ids,
             blocks,
-            first_data_row=start_at,
+            first_data_row=LEDGER_FIRST_DATA_ROW,
             n_rows=n_rows,
-            last_data_row=last_deposit,
+            last_data_row=WITHDRAW_FIRST_DATA_ROW - 1,
         )
 
     def clear_bank_names(self) -> int:
@@ -478,21 +445,8 @@ class SheetClient:
                     )
                 end = start + len(rows) - 1
                 skip = ledger_skip_columns(skip_day, skip_bank)
-                skip |= locked_columns_in_rows(self._protected_blocks(), start, end)
-                if set(REQUIRED_WRITE_COLS) & skip:
-                    start = writable_append_row(
-                        self.ws.col_values(7),
-                        self._protected_blocks(),
-                        first_data_row=start,
-                        n_rows=len(rows),
-                    )
-                    if not start:
-                        raise ConfigError(
-                            f"No unlocked cashbook cells left on tab {self.tab_title()}."
-                        )
-                    end = start + len(rows) - 1
-                    skip = ledger_skip_columns(skip_day, skip_bank)
-                    skip |= locked_columns_in_rows(self._protected_blocks(), start, end)
+                locked = locked_columns_in_rows(self._protected_blocks(), start, end)
+                skip |= locked - set(REQUIRED_WRITE_COLS)
                 batches, start = ledger_write_batches(
                     rows,
                     start,

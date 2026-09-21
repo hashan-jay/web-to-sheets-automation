@@ -1,14 +1,19 @@
 import unittest
 
 from src.tally import (
+    STAFF_DEPOSIT_TYPE,
+    STAFF_WITHDRAW_TYPE,
     copy_group,
     format_amount,
+    is_staff_tx_type,
+    is_withdraw_type,
     parse_amount,
     estimated_pages,
     pager_bounds,
     pager_finished,
     pager_last_from_hrefs,
     parse_website_summary,
+    staff_scrape_types,
     tally_rows,
     txn_kind,
 )
@@ -24,6 +29,16 @@ class TallyTests(unittest.TestCase):
     def test_kind_and_copy_group(self) -> None:
         self.assertEqual(txn_kind("WITHDRAW"), "withdraw")
         self.assertEqual(txn_kind("DEPOSIT"), "deposit")
+        self.assertEqual(txn_kind("STAFF WITHDRAW"), "withdraw")
+        self.assertEqual(txn_kind("STAFF DEPOSIT"), "deposit")
+        self.assertTrue(is_withdraw_type("STAFF_WITHDRAW"))
+        self.assertFalse(is_withdraw_type("STAFF DEPOSIT"))
+        self.assertTrue(is_staff_tx_type("STAFF DEPOSIT"))
+        self.assertTrue(is_staff_tx_type("staff withdraw"))
+        self.assertEqual(staff_scrape_types("ACTIVE"), [STAFF_DEPOSIT_TYPE, STAFF_WITHDRAW_TYPE])
+        self.assertEqual(staff_scrape_types(""), [STAFF_DEPOSIT_TYPE, STAFF_WITHDRAW_TYPE])
+        self.assertEqual(staff_scrape_types("STAFF DEPOSIT"), [STAFF_DEPOSIT_TYPE])
+        self.assertEqual(staff_scrape_types("STAFF WITHDRAW"), [STAFF_WITHDRAW_TYPE])
         self.assertEqual(copy_group("Copied"), "sent")
         self.assertEqual(copy_group("Pending"), "to_send")
         self.assertEqual(copy_group("Failed"), "failed")

@@ -4,6 +4,7 @@ import re
 
 from src.config import Settings, normalize_google_sheet_id
 from src.models import Transaction
+from src.tally import is_withdraw_type
 
 TAG_RE = re.compile(r"^\[.*?\]\s*")
 DATE_RE = re.compile(r"(\d{4})-(\d{2})-(\d{2})")
@@ -98,6 +99,9 @@ _SKIP_BRAND_TOKENS = {
     "DEPOSIT",
     "WITHDRAW",
     "WITHDRAWAL",
+    "STAFF",
+    "STAFFDEPOSIT",
+    "STAFFWITHDRAW",
     "UNCLAIM",
     "MANUAL",
     "CREATED",
@@ -198,7 +202,7 @@ def match_sheet_game(brand: str, games: tuple[str, ...] = GROUP_D_GAMES) -> str:
 
 
 def is_withdraw(status: object) -> bool:
-    return str(status or "").strip().upper().startswith("WITHDRAW")
+    return is_withdraw_type(status)
 
 
 def sheet_status(status: object) -> str:

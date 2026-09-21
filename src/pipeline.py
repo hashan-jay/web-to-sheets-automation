@@ -16,7 +16,7 @@ from src.mapper import (
 )
 from src.models import Transaction
 from src.scraper import scrape_transactions
-from src.tally import COMPLETED_STATUS, local_today
+from src.tally import COMPLETED_STATUS, local_today, staff_scrape_types
 from src.sheets import WITHDRAW_FIRST_DATA_ROW, SheetClient, new_rows_only
 
 EventFn = Callable[[dict], None]
@@ -106,7 +106,15 @@ def gather_from_dashboard(
     session=None,
 ) -> PipelineResult:
     result = PipelineResult()
-    _emit(on_event, kind="log", message="Gathering transactions from the dashboard...")
+    types = staff_scrape_types(settings.filter_type)
+    _emit(
+        on_event,
+        kind="log",
+        message=(
+            "Gathering transactions from the dashboard. "
+            "Type: " + " + ".join(types) + f" · Status: {COMPLETED_STATUS}."
+        ),
+    )
     if settings.headed:
         _emit(
             on_event,

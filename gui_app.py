@@ -195,7 +195,15 @@ from src.pipeline import (
     sync_date_to_sheet,
     txn_row_event,
 )
-from src.tally import COMPLETED_STATUS, format_amount, local_today, parse_amount, txn_kind
+from src.tally import (
+    COMPLETED_STATUS,
+    STAFF_DEPOSIT_TYPE,
+    STAFF_WITHDRAW_TYPE,
+    format_amount,
+    local_today,
+    parse_amount,
+    txn_kind,
+)
 from src.workspace import (
     apply_workspace_to_settings,
     load_workspace_state,
@@ -652,7 +660,7 @@ class FinanceAutomationApp:
         ttk.Label(titles, text="Finance Automation", style="Header.TLabel").pack(anchor="w")
         ttk.Label(
             titles,
-            text="Scrapes Completed only. Pick a date so the GUI count matches the website Record count, then send once — no duplicate sheet rows.",
+            text="Scrapes Completed STAFF DEPOSIT and STAFF WITHDRAW only. Pick a date so the GUI count matches the website Record count, then send once — no duplicate sheet rows.",
             style="HeaderSub.TLabel",
         ).pack(anchor="w", pady=(4, 0))
         self._build_theme_switch(header)
@@ -742,8 +750,8 @@ class FinanceAutomationApp:
         self._refresh_account_buttons()
 
         ttk.Label(sidebar, text="What to scrape", style="CardTitle.TLabel").pack(anchor="w", pady=(4, 6))
-        ttk.Checkbutton(sidebar, text="Scrape deposits", variable=self.scrape_deposits).pack(anchor="w")
-        ttk.Checkbutton(sidebar, text="Scrape withdrawals", variable=self.scrape_withdrawals).pack(anchor="w")
+        ttk.Checkbutton(sidebar, text="Scrape STAFF DEPOSIT", variable=self.scrape_deposits).pack(anchor="w")
+        ttk.Checkbutton(sidebar, text="Scrape STAFF WITHDRAW", variable=self.scrape_withdrawals).pack(anchor="w")
         ttk.Checkbutton(
             sidebar,
             text="Hide browser (only if 2FA is already saved)",
@@ -754,7 +762,7 @@ class FinanceAutomationApp:
         ttk.Button(sidebar, text="Run now", style="Run.TButton", command=self._run_now).pack(fill="x", pady=3)
         ttk.Label(
             sidebar,
-            text="Run now reads Completed once. Automated Run selects the date, sets Status to COMPLETED, reads every page, shows rows in the GUI, and sends new IDs to the Google Sheet.",
+            text="Run now sets Type to STAFF DEPOSIT and STAFF WITHDRAW with Status COMPLETED, reads every page, and shows rows in the GUI. Automated Run does the same and sends new IDs to the Google Sheet.",
             style="Muted.TLabel",
             wraplength=280,
         ).pack(anchor="w", pady=(8, 8))
@@ -798,7 +806,7 @@ class FinanceAutomationApp:
         ).pack(fill="x", pady=3)
         ttk.Label(
             sidebar,
-            text="Automated Run opens the dashboard, selects today's date, sets Status to COMPLETED, and scrapes every Completed deposit and withdrawal into the GUI. Deposit ATTACHMENT screenshots are read so the Google Sheet BANK column can be filled on those deposit rows. Withdrawals stay blank for manual BANK entry. When Send Extracted records is checked, new IDs are written to the Google Sheet. After each scrape it waits the seconds you set, then starts the next. Stop Automated Run ends the loop.",
+            text="Automated Run opens the dashboard, selects the date, sets Type to STAFF DEPOSIT and STAFF WITHDRAW together with Status COMPLETED, and scrapes those Completed rows into the GUI. Deposits start on Google Sheet row 105 of the day tab; withdrawals start on row 1024. Deposit ATTACHMENT screenshots fill BANK on deposit rows. Withdrawals stay blank for manual BANK entry. When Send Extracted records is checked, new IDs are written to the Google Sheet. After each scrape it waits the seconds you set, then starts the next. Stop Automated Run ends the loop.",
             style="Muted.TLabel",
             wraplength=280,
         ).pack(anchor="w", pady=(4, 10))
@@ -904,7 +912,7 @@ class FinanceAutomationApp:
         filter_card = ttk.Frame(right, style="Card.TFrame", padding=12)
         filter_card.grid(row=0, column=0, sticky="ew", pady=(0, 12))
         filter_card.columnconfigure(0, weight=1)
-        ttk.Label(filter_card, text="Tally date  ·  Completed only", style="CardTitle.TLabel").grid(
+        ttk.Label(filter_card, text="Tally date  ·  Completed STAFF DEPOSIT + STAFF WITHDRAW", style="CardTitle.TLabel").grid(
             row=0, column=0, sticky="w"
         )
         ttk.Label(filter_card, textvariable=self.workspace_caption, style="Tally.TLabel").grid(
@@ -1693,6 +1701,12 @@ class FinanceAutomationApp:
         settings.filter_date_from = day
         settings.filter_date_to = day
         settings.filter_status = COMPLETED_STATUS
+        types = []
+        if self.scrape_deposits.get():
+            types.append(STAFF_DEPOSIT_TYPE)
+        if self.scrape_withdrawals.get():
+            types.append(STAFF_WITHDRAW_TYPE)
+        settings.filter_type = ",".join(types) or f"{STAFF_DEPOSIT_TYPE},{STAFF_WITHDRAW_TYPE}"
         settings.use_dashboard_api = False
         for slot in GOOGLE_SHEET_SLOTS:
             sheet_id = self._sheet_id_from_field(slot)
@@ -1792,10 +1806,11 @@ class FinanceAutomationApp:
         self.poll_interval.set(seconds)
         self.status_text.set("Automated run: scraping Completed")
         self._append_log(
-            "Automated Run started. The browser will select the date, set Status "
-            "to COMPLETED, read every Completed deposit and withdrawal into the GUI, "
-            "and send new IDs to the Google Sheet. Deposit ATTACHMENT screenshots "
-            "are used to fill BANK on deposit rows."
+            "Automated Run started. The browser will select the date, set Type to "
+            "STAFF DEPOSIT and STAFF WITHDRAW, set Status to COMPLETED, read those "
+            "Completed rows into the GUI, and send new IDs to the Google Sheet "
+            "(deposits from row 105, withdrawals from row 1024 on the day tab). "
+            "Deposit ATTACHMENT screenshots are used to fill BANK on deposit rows."
             f" The next scrape waits {seconds}s after this one finishes."
         )
         self._auto_tick()
@@ -1854,7 +1869,8 @@ class FinanceAutomationApp:
         self.pages.select(0)
         write_sheet = self._auto_write_sheet()
         self._append_log(
-            f"Automated Run tick: selecting date {self._scrape_date()}, Status COMPLETED, "
+            f"Automated Run tick: selecting date {self._scrape_date()}, "
+            "Type STAFF DEPOSIT + STAFF WITHDRAW, Status COMPLETED, "
             f"and scraping every page on {normalize_dashboard_url(self.login_website.get())}."
             + (
                 " Deposit ATTACHMENT screenshots will fill BANK on new deposit rows."
@@ -2033,12 +2049,24 @@ class FinanceAutomationApp:
         self.auto_running = False
         self._cancel_auto_timer()
         self.pages.select(0)
+        write_sheet = self._auto_write_sheet()
         self._append_log(
-            "Run now started. Completed will be read once, remaining needed "
-            "transactions will be tracked, then this run will stop."
+            "Run now started. Type STAFF DEPOSIT and STAFF WITHDRAW with Status "
+            "COMPLETED will be read once, remaining needed transactions will be "
+            "tracked, then this run will stop."
+            + (
+                " New extracted records will be sent to the Google Sheet."
+                if write_sheet
+                else ""
+            )
         )
         try:
-            self._start_job(scrape=True, write_sheet=False, once=True)
+            self._start_job(
+                scrape=True,
+                write_sheet=write_sheet,
+                once=True,
+                one_by_one=write_sheet,
+            )
         except Exception as exc:
             self._single_run_active = False
             self.capturing_latest = False
@@ -2465,6 +2493,12 @@ class FinanceAutomationApp:
         selected = self._type_filter_value(section)
         if selected == "All types":
             return True
+        kind = txn_kind(raw)
+        key = selected.strip().upper()
+        if key in {"DEPOSIT", "STAFF DEPOSIT"}:
+            return kind == "deposit"
+        if key in {"WITHDRAW", "STAFF WITHDRAW", "WITHDRAWAL"}:
+            return kind == "withdraw"
         return self._display_type(raw).upper().startswith(selected)
 
     def _status_matches(self, status: str, section: str) -> bool:

@@ -12,7 +12,7 @@ from src.config import Settings, normalize_dashboard_url
 from src.deposit_bank import extract_attachment_url
 from src.mapper import captured_brand, first_brand_tag
 from src.models import Transaction
-from src.tally import COMPLETED_STATUS, format_amount, parse_amount
+from src.tally import COMPLETED_STATUS, format_amount, parse_amount, staff_scrape_types
 
 LIST_PATH = "/transactions/getAllTransactions"
 READ_ADMIN_TOKEN_JS = """() => {
@@ -115,20 +115,25 @@ def load_api_session(settings: Settings) -> ApiSession | None:
     return ApiSession(origin=origin, token=token, cookies=cookies)
 
 
-def list_filter_payload(settings: Settings, page_index: int = 0) -> dict[str, str]:
+def list_filter_payload(
+    settings: Settings, page_index: int = 0, tx_type: str = ""
+) -> dict[str, str]:
     day = (settings.filter_date_from or "").strip()
     end = (settings.filter_date_to or day).strip() or day
     status = (settings.filter_status or COMPLETED_STATUS).strip() or COMPLETED_STATUS
     if "COMPLETED" not in status.upper():
         status = COMPLETED_STATUS
-    tx_type = (settings.filter_type or "ACTIVE").strip() or "ACTIVE"
+    chosen = (tx_type or "").strip()
+    if not chosen:
+        types = staff_scrape_types(settings.filter_type)
+        chosen = types[0] if types else "STAFF DEPOSIT"
     return {
         "pageIndex": str(max(int(page_index), 0)),
         "includeAdmin": "1",
         "background": "0",
         "transactionId": "",
         "name": "",
-        "type": tx_type,
+        "type": chosen,
         "sDate": f"{day} 00:00:00" if day else "",
         "eDate": f"{end} 23:59:59" if end else "",
         "sCash": "",
@@ -292,9 +297,10 @@ def _website_total(raw: object) -> str:
     return format_amount(amount)
 
 
-def fetch_completed(
+def _fetch_completed_type(
     post: PostFn,
     settings: Settings,
+    tx_type: str,
     limit: int | None = None,
     on_event=None,
     max_pages: int | None = None,
@@ -303,7 +309,7 @@ def fetch_completed(
     quiet: bool = False,
     expect_new: int | None = None,
 ) -> ApiCapture | None:
-    first = unwrap_list_payload(post(LIST_PATH, list_filter_payload(settings, 0)))
+    first = unwrap_list_payload(post(LIST_PATH, list_filter_payload(settings, 0, tx_type)))
     if not first:
         return None
     total_count = int(first.get("totalCount") or 0)
@@ -322,6 +328,8 @@ def fetch_completed(
             if not isinstance(raw, dict):
                 continue
             txn = transaction_from_api(raw)
+            if not txn.status:
+                txn.status = tx_type
             if not txn.transaction_id or txn.transaction_id in collected:
                 continue
             if known_ids is not None and txn.transaction_id in seen:
@@ -332,7 +340,7 @@ def fetch_completed(
                 {
                     "kind": "log",
                     "message": (
-                        f"HTTP page {page_num}/{page_limit} · "
+                        f"{tx_type} HTTP page {page_num}/{page_limit} · "
                         f"{len(collected)} unique of {total_count or '?'} Completed records."
                     ),
                 }
@@ -355,7 +363,9 @@ def fetch_completed(
                 break
             if known_ids is not None and missing and len(collected) >= missing:
                 break
-            payload = unwrap_list_payload(post(LIST_PATH, list_filter_payload(settings, page_index)))
+            payload = unwrap_list_payload(
+                post(LIST_PATH, list_filter_payload(settings, page_index, tx_type))
+            )
             if not payload:
                 break
             before = len(collected)
@@ -364,8 +374,6 @@ def fetch_completed(
             if len(collected) == before and catch_up:
                 break
 
-    if total_count and not collected and not seen:
-        return None
     rows = list(collected.values())
     if limit:
         rows = rows[:limit]
@@ -373,6 +381,65 @@ def fetch_completed(
         transactions=rows,
         website_records=total_count,
         website_total=_website_total(first.get("totalAmount")),
+        pages=pages_read,
+    )
+
+
+def fetch_completed(
+    post: PostFn,
+    settings: Settings,
+    limit: int | None = None,
+    on_event=None,
+    max_pages: int | None = None,
+    known_ids: set[str] | None = None,
+    catch_up: bool = True,
+    quiet: bool = False,
+    expect_new: int | None = None,
+) -> ApiCapture | None:
+    types = staff_scrape_types(settings.filter_type)
+    collected: dict[str, Transaction] = {}
+    total_count = 0
+    total_amount = 0.0
+    pages_read = 0
+    saw_payload = False
+    remaining = None if expect_new is None else max(0, int(expect_new))
+    for tx_type in types:
+        capture = _fetch_completed_type(
+            post,
+            settings,
+            tx_type,
+            limit=limit,
+            on_event=on_event,
+            max_pages=max_pages,
+            known_ids=known_ids,
+            catch_up=catch_up,
+            quiet=quiet,
+            expect_new=remaining,
+        )
+        if capture is None:
+            continue
+        saw_payload = True
+        total_count += int(capture.website_records or 0)
+        total_amount += parse_amount(capture.website_total)
+        pages_read += int(capture.pages or 0)
+        for txn in capture.transactions:
+            if txn.transaction_id and txn.transaction_id not in collected:
+                collected[txn.transaction_id] = txn
+        if remaining is not None:
+            remaining = max(0, remaining - len(capture.transactions))
+            if remaining == 0 and known_ids is not None and not catch_up:
+                break
+        if limit and len(collected) >= limit:
+            break
+    if not saw_payload:
+        return None
+    rows = list(collected.values())
+    if limit:
+        rows = rows[:limit]
+    return ApiCapture(
+        transactions=rows,
+        website_records=total_count,
+        website_total=format_amount(total_amount) if total_count or total_amount else "",
         pages=pages_read,
     )
 

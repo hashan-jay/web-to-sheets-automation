@@ -18,6 +18,7 @@ from src.mapper import (
     sheet_amount,
     sheet_bank,
     sheet_game_choices,
+    is_withdraw,
     sheet_status,
     sheet_tab_name,
     to_sheet_row,
@@ -199,9 +200,30 @@ class MapperTests(unittest.TestCase):
         self.assertEqual(row[2], "")
         self.assertEqual(deposit[2], "")
         self.assertEqual(sheet_status("WITHDRAWAL"), "Withdraw")
+        self.assertTrue(is_withdraw("STAFF WITHDRAW"))
+        self.assertFalse(is_withdraw("STAFF DEPOSIT"))
+        self.assertEqual(sheet_status("STAFF WITHDRAW"), "Withdraw")
+        self.assertEqual(sheet_status("STAFF DEPOSIT"), "Deposit")
         self.assertEqual(sheet_amount("50", "WITHDRAW"), "-50")
+        self.assertEqual(sheet_amount("50", "STAFF WITHDRAW"), "-50")
+        self.assertEqual(sheet_amount("30", "STAFF DEPOSIT"), "30")
         self.assertEqual(sheet_amount("-50", "WITHDRAWAL"), "-50")
         self.assertEqual(normalize_status("WITHDRAW"), "Withdraw")
+        staff_withdraw = to_sheet_row(
+            Transaction(
+                transaction_id="17120000001",
+                username="A2",
+                bank_account_name="Staff Out",
+                amount="80",
+                datetime="2026-09-21 10:00",
+                status="STAFF WITHDRAW",
+                brand="FUCKSPIN",
+            ),
+            settings,
+        )
+        self.assertEqual(staff_withdraw[4], "-80")
+        self.assertEqual(staff_withdraw[5], "Withdraw")
+        self.assertEqual(staff_withdraw[6], "17120000001")
 
     def test_group_d_game_dropdown(self) -> None:
         self.assertTrue(uses_group_d_games("Copy of GROUP D AUD"))
