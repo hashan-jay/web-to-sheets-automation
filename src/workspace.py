@@ -7,11 +7,14 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from src.config import (
+    DEFAULT_DEPOSIT_START_ROW,
+    DEFAULT_WITHDRAW_START_ROW,
     GOOGLE_SHEET_SLOTS,
     ROOT,
     Settings,
     normalize_dashboard_url,
     normalize_google_sheet_id,
+    normalize_sheet_start_rows,
 )
 from src.mapper import normalize_sheet_brands
 
@@ -70,6 +73,8 @@ def empty_workspace_state() -> dict:
         "username": "",
         "sheet_ids": [""] * len(GOOGLE_SHEET_SLOTS),
         "sheet_brands": [],
+        "deposit_start_row": DEFAULT_DEPOSIT_START_ROW,
+        "withdraw_start_row": DEFAULT_WITHDRAW_START_ROW,
     }
 
 
@@ -94,6 +99,12 @@ def load_workspace_state(key: str) -> dict:
         padded[index] = normalize_google_sheet_id(ids[index] if index < len(ids) else "")
     state["sheet_ids"] = padded
     state["sheet_brands"] = normalize_sheet_brands(data.get("sheet_brands"))
+    deposit, withdraw = normalize_sheet_start_rows(
+        data.get("deposit_start_row", DEFAULT_DEPOSIT_START_ROW),
+        data.get("withdraw_start_row", DEFAULT_WITHDRAW_START_ROW),
+    )
+    state["deposit_start_row"] = deposit
+    state["withdraw_start_row"] = withdraw
     return state
 
 
@@ -104,6 +115,8 @@ def save_workspace_state(
     username: str = "",
     sheet_ids: list[str] | None = None,
     sheet_brands: list[str] | None = None,
+    deposit_start_row: int | None = None,
+    withdraw_start_row: int | None = None,
 ) -> dict:
     if not key:
         return empty_workspace_state()
@@ -119,6 +132,13 @@ def save_workspace_state(
         current["sheet_ids"] = padded
     if sheet_brands is not None:
         current["sheet_brands"] = normalize_sheet_brands(sheet_brands)
+    if deposit_start_row is not None or withdraw_start_row is not None:
+        deposit, withdraw = normalize_sheet_start_rows(
+            current["deposit_start_row"] if deposit_start_row is None else deposit_start_row,
+            current["withdraw_start_row"] if withdraw_start_row is None else withdraw_start_row,
+        )
+        current["deposit_start_row"] = deposit
+        current["withdraw_start_row"] = withdraw
     path = workspace_state_path(key)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(current, indent=2), encoding="utf-8")
@@ -137,7 +157,14 @@ def seed_workspace_sheets(key: str, sheet_ids: list[str]) -> dict:
 def apply_workspace_to_settings(settings: Settings, key: str) -> Settings:
     settings.database_path = workspace_database_path(key)
     settings.auth_state_path = workspace_auth_path(key)
-    settings.sheet_brands = tuple(load_workspace_state(key).get("sheet_brands") or ())
+    state = load_workspace_state(key)
+    settings.sheet_brands = tuple(state.get("sheet_brands") or ())
+    deposit, withdraw = normalize_sheet_start_rows(
+        state.get("deposit_start_row", settings.deposit_start_row),
+        state.get("withdraw_start_row", settings.withdraw_start_row),
+    )
+    settings.deposit_start_row = deposit
+    settings.withdraw_start_row = withdraw
     return settings
 
 

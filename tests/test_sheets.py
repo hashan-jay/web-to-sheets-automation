@@ -179,6 +179,20 @@ class SheetDedupeTests(unittest.TestCase):
         self.assertEqual(batches[1][1][0][0], "Name")
         self.assertEqual(batches[1][1][0][3], "9")
 
+    def test_custom_start_rows_keep_deposit_below_withdraw(self) -> None:
+        ids = [""] * 2600
+        self.assertEqual(
+            next_append_row(ids, first_data_row=200, last_data_row=2499),
+            200,
+        )
+        ids[199] = "17110000001"
+        ids[200] = "17110000002"
+        self.assertEqual(
+            next_append_row(ids, first_data_row=200, last_data_row=2499),
+            202,
+        )
+        self.assertEqual(next_append_row(ids, first_data_row=2500), 2500)
+
     def test_withdrawals_start_at_row_1024(self) -> None:
         self.assertEqual(WITHDRAW_FIRST_DATA_ROW, 1024)
         self.assertEqual(

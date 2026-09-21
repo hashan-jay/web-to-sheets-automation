@@ -7,7 +7,12 @@ from pathlib import Path
 import gspread
 from gspread.exceptions import APIError
 
-from src.config import service_account_email
+from src.config import (
+    DEFAULT_DEPOSIT_START_ROW,
+    DEFAULT_WITHDRAW_START_ROW,
+    normalize_sheet_start_rows,
+    service_account_email,
+)
 from src.errors import ConfigError
 from src.mapper import (
     DEFAULT_SHEET_COLUMNS,
@@ -349,7 +354,9 @@ class SheetClient:
             self.spreadsheet = client.open_by_key(sheet_id)
             self.sheet_id = sheet_id
             self.slot = 0
-            self._ledger_start = LEDGER_FIRST_DATA_ROW
+            self._deposit_start = DEFAULT_DEPOSIT_START_ROW
+            self._withdraw_start = DEFAULT_WITHDRAW_START_ROW
+            self._ledger_start = DEFAULT_DEPOSIT_START_ROW
             self._skip_day_column = True
             self._skip_bank_column = False
             self.last_write_start = 0
@@ -411,12 +418,26 @@ class SheetClient:
             self._worksheets = list(self.spreadsheet.worksheets())
         return self._worksheets
 
+    def set_write_starts(self, deposit_start: int, withdraw_start: int) -> None:
+        deposit, withdraw = normalize_sheet_start_rows(deposit_start, withdraw_start)
+        self._deposit_start = deposit
+        self._withdraw_start = withdraw
+        self._ledger_start = deposit
+
+    @property
+    def deposit_start_row(self) -> int:
+        return int(getattr(self, "_deposit_start", DEFAULT_DEPOSIT_START_ROW))
+
+    @property
+    def withdraw_start_row(self) -> int:
+        return int(getattr(self, "_withdraw_start", DEFAULT_WITHDRAW_START_ROW))
+
     def _apply_title_layout(self) -> None:
-        self._ledger_start = LEDGER_FIRST_DATA_ROW
+        self._ledger_start = self.deposit_start_row
         self._skip_day_column = True
 
     def _apply_tab_layout(self) -> None:
-        """Every date tab uses deposits from row 105 and withdrawals from 1024."""
+        """Date tabs write deposits then withdrawals from the saved start rows."""
         self._apply_title_layout()
         if self._columns_ready and self.columns:
             return
@@ -546,16 +567,16 @@ class SheetClient:
             return writable_append_row(
                 ids,
                 blocks,
-                first_data_row=WITHDRAW_FIRST_DATA_ROW,
+                first_data_row=self.withdraw_start_row,
                 n_rows=n_rows,
                 required=required,
             )
         return writable_append_row(
             ids,
             blocks,
-            first_data_row=LEDGER_FIRST_DATA_ROW,
+            first_data_row=self.deposit_start_row,
             n_rows=n_rows,
-            last_data_row=WITHDRAW_FIRST_DATA_ROW - 1,
+            last_data_row=self.withdraw_start_row - 1,
             required=required,
         )
 
@@ -633,7 +654,7 @@ class SheetClient:
                 self._skip_day_column = skip_day
                 self._skip_bank_column = skip_bank
                 if skip_day and not self._ledger_start and not withdraw:
-                    self._ledger_start = LEDGER_FIRST_DATA_ROW
+                    self._ledger_start = self.deposit_start_row
                 return len(rows)
             except APIError as exc:
                 office = office_file_error(exc)
@@ -649,7 +670,7 @@ class SheetClient:
                     getattr(self, "_lock_cache", {}).pop(self.tab_title(), None)
                     self._lock_meta_loaded = False
                     if not withdraw:
-                        self._ledger_start = LEDGER_FIRST_DATA_ROW
+                        self._ledger_start = self.deposit_start_row
                     last_error = locked
                     continue
                 if locked:
@@ -714,7 +735,7 @@ class SheetClient:
         )
 
     def _ensure_row_capacity(self, last_row: int) -> None:
-        needed = max(int(last_row) + 50, WITHDRAW_FIRST_DATA_ROW + 50)
+        needed = max(int(last_row) + 50, self.withdraw_start_row + 50)
         try:
             current = int(getattr(self.ws, "row_count", 0) or 0)
             if current < needed:

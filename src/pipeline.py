@@ -60,6 +60,7 @@ def _open_sheet(settings: Settings, slot: int, sheet_id: str) -> SheetClient:
             raise mapped from exc
         raise
     sheet.slot = slot
+    sheet.set_write_starts(settings.deposit_start_row, settings.withdraw_start_row)
     return sheet
 
 
@@ -817,7 +818,7 @@ def _write_day_rows(
                     + (
                         f" at row {start}"
                         + (
-                            f" (withdrawals from row {WITHDRAW_FIRST_DATA_ROW})"
+                            f" (withdrawals from row {getattr(sheet, 'withdraw_start_row', WITHDRAW_FIRST_DATA_ROW)})"
                             if is_withdraw(txn.status)
                             else ""
                         )
@@ -871,7 +872,7 @@ def _write_day_rows(
                     f"on tab {sheet.tab_title()}"
                     + (f" starting at row {start}" if start else "")
                     + (
-                        f" (withdrawals from row {WITHDRAW_FIRST_DATA_ROW})."
+                        f" (withdrawals from row {getattr(sheet, 'withdraw_start_row', WITHDRAW_FIRST_DATA_ROW)})."
                         if withdraw_block
                         else (
                             " in unlocked cells only (skipped locked columns and heading rows)."

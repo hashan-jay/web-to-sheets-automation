@@ -13,6 +13,10 @@ from src.errors import ConfigError
 ROOT = Path(__file__).resolve().parent.parent
 LOGIN_ACCOUNT_SLOTS = (1, 2, 3)
 GOOGLE_SHEET_SLOTS = (1, 2, 3, 4, 5)
+DEFAULT_DEPOSIT_START_ROW = 105
+DEFAULT_WITHDRAW_START_ROW = 1024
+MIN_SHEET_START_ROW = 2
+MAX_SHEET_START_ROW = 1_000_000
 _SHEET_URL_RE = re.compile(r"/spreadsheets/d/([a-zA-Z0-9-_]+)")
 
 
@@ -70,6 +74,24 @@ def normalize_google_sheet_id(raw: object) -> str:
 def google_sheet_url(sheet_id: object) -> str:
     key = normalize_google_sheet_id(sheet_id)
     return f"https://docs.google.com/spreadsheets/d/{key}" if key else ""
+
+
+def normalize_sheet_start_row(raw: object, default: int) -> int:
+    try:
+        value = int(str(raw or "").strip())
+    except (TypeError, ValueError):
+        return int(default)
+    if value < MIN_SHEET_START_ROW or value > MAX_SHEET_START_ROW:
+        return int(default)
+    return value
+
+
+def normalize_sheet_start_rows(deposit: object, withdraw: object) -> tuple[int, int]:
+    deposit_row = normalize_sheet_start_row(deposit, DEFAULT_DEPOSIT_START_ROW)
+    withdraw_row = normalize_sheet_start_row(withdraw, DEFAULT_WITHDRAW_START_ROW)
+    if withdraw_row <= deposit_row:
+        withdraw_row = min(MAX_SHEET_START_ROW, deposit_row + 1)
+    return deposit_row, withdraw_row
 
 
 def google_sheet_env_key(slot: int) -> str:
@@ -282,6 +304,8 @@ class Settings:
     google_sheet_id_3: str = ""
     google_sheet_id_4: str = ""
     google_sheet_id_5: str = ""
+    deposit_start_row: int = DEFAULT_DEPOSIT_START_ROW
+    withdraw_start_row: int = DEFAULT_WITHDRAW_START_ROW
 
     def sheet_id_at(self, slot: int) -> str:
         if int(slot) <= 1:
@@ -311,6 +335,10 @@ class Settings:
     @classmethod
     def load(cls) -> Settings:
         _load_env()
+        deposit_start_row, withdraw_start_row = normalize_sheet_start_rows(
+            os.getenv("DEPOSIT_START_ROW", str(DEFAULT_DEPOSIT_START_ROW)),
+            os.getenv("WITHDRAW_START_ROW", str(DEFAULT_WITHDRAW_START_ROW)),
+        )
         return cls(
             dashboard_url=normalize_dashboard_url(os.getenv("DASHBOARD_URL", "")),
             dashboard_username=os.getenv("DASHBOARD_USERNAME", "").strip(),
@@ -354,6 +382,8 @@ class Settings:
             poll_interval_seconds=_int("POLL_INTERVAL_SECONDS", 60),
             use_open_browser=_bool("USE_OPEN_BROWSER", False),
             use_dashboard_api=_bool("USE_DASHBOARD_API", True),
+            deposit_start_row=deposit_start_row,
+            withdraw_start_row=withdraw_start_row,
         )
 
     def require_dashboard(self) -> None:

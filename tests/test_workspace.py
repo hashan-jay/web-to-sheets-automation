@@ -109,6 +109,23 @@ class WorkspaceStateTests(unittest.TestCase):
         apply_workspace_to_settings(settings, key)
         self.assertEqual(settings.sheet_brands, ("KABOOM77",))
 
+    def test_save_and_load_sheet_start_rows(self) -> None:
+        key = "skgaming23.as6868.com__sk23finance111"
+        save_workspace_state(key, deposit_start_row=200, withdraw_start_row=2500)
+        state = load_workspace_state(key)
+        self.assertEqual(state["deposit_start_row"], 200)
+        self.assertEqual(state["withdraw_start_row"], 2500)
+        save_workspace_state(key, deposit_start_row=1800, withdraw_start_row=1024)
+        fixed = load_workspace_state(key)
+        self.assertEqual(fixed["deposit_start_row"], 1800)
+        self.assertEqual(fixed["withdraw_start_row"], 1801)
+        from src.config import Settings
+
+        settings = Settings.load()
+        apply_workspace_to_settings(settings, key)
+        self.assertEqual(settings.deposit_start_row, 1800)
+        self.assertEqual(settings.withdraw_start_row, 1801)
+
     def test_seed_sheets_only_when_empty(self) -> None:
         key = "site__user"
         seeded = seed_workspace_sheets(key, ["1BAXqHMZAP9-sVXGn_up32CkmOmwLiPAxDnYf3yqZiRo"])

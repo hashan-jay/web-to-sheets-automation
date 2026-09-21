@@ -171,6 +171,8 @@ STATUS_RANK = {
 }
 
 from src.config import (
+    DEFAULT_DEPOSIT_START_ROW,
+    DEFAULT_WITHDRAW_START_ROW,
     GOOGLE_SHEET_SLOTS,
     Settings,
     active_login_slot,
@@ -180,6 +182,8 @@ from src.config import (
     load_login_accounts,
     normalize_dashboard_url,
     normalize_google_sheet_id,
+    normalize_sheet_start_row,
+    normalize_sheet_start_rows,
     persist_env_values,
     persist_gui_theme,
     persist_login_account,
@@ -302,6 +306,8 @@ class FinanceAutomationApp:
         ]
         self.google_sheet = self.google_sheet_vars[0]
         self.google_sheet_2 = self.google_sheet_vars[1]
+        self.deposit_start_row = tk.StringVar(value=str(self.settings.deposit_start_row))
+        self.withdraw_start_row = tk.StringVar(value=str(self.settings.withdraw_start_row))
         self.db = GatheringDB(self.settings.database_path)
         self.dark_mode = tk.BooleanVar(value=load_gui_theme() == "dark")
         self.auto_running = False
@@ -878,7 +884,7 @@ class FinanceAutomationApp:
         ).pack(fill="x", pady=3)
         ttk.Label(
             sidebar,
-            text="Automated Run opens the dashboard, selects the date, sets Type to STAFF DEPOSIT and STAFF WITHDRAW together with Status COMPLETED, and scrapes those Completed rows into the GUI. Deposits start on Google Sheet row 105 of the day tab; withdrawals start on row 1024. Deposit ATTACHMENT screenshots fill BANK on deposit rows. Withdrawals stay blank for manual BANK entry. When Send Extracted records is checked, new IDs are written to the Google Sheet. After each scrape it waits the seconds you set, then starts the next. Stop Automated Run ends the loop.",
+            text="Automated Run opens the dashboard, selects the date, sets Type to STAFF DEPOSIT and STAFF WITHDRAW together with Status COMPLETED, and scrapes those Completed rows into the GUI. Deposits and withdrawals start on the Google Sheet rows you save below. Deposit ATTACHMENT screenshots fill BANK on deposit rows. Withdrawals stay blank for manual BANK entry. When Send Extracted records is checked, new IDs are written to the Google Sheet. After each scrape it waits the seconds you set, then starts the next. Stop Automated Run ends the loop.",
             style="Muted.TLabel",
             wraplength=280,
         ).pack(anchor="w", pady=(4, 10))
@@ -914,6 +920,35 @@ class FinanceAutomationApp:
         ttk.Button(sheet_btns, text="Save sheets", style="Quick.TButton", command=self._save_google_sheets).pack(
             fill="x", pady=2
         )
+        ttk.Label(sidebar, text="Sheet start rows", style="CardTitle.TLabel").pack(anchor="w", pady=(4, 6))
+        ttk.Label(
+            sidebar,
+            text="Deposits fill from this row down and stop before the withdraw start row, so a large deposit load cannot overwrite withdrawals.",
+            style="Muted.TLabel",
+            wraplength=280,
+        ).pack(anchor="w", pady=(0, 4))
+        ttk.Label(sidebar, text="Deposit start row", style="Muted.TLabel").pack(anchor="w")
+        ttk.Entry(sidebar, textvariable=self.deposit_start_row, width=28).pack(fill="x", pady=(2, 4))
+        ttk.Button(
+            sidebar,
+            text="Save deposit start row",
+            style="Quick.TButton",
+            command=self._save_deposit_start_row,
+        ).pack(fill="x", pady=(0, 8))
+        ttk.Label(sidebar, text="Withdraw start row", style="Muted.TLabel").pack(anchor="w")
+        ttk.Entry(sidebar, textvariable=self.withdraw_start_row, width=28).pack(fill="x", pady=(2, 4))
+        ttk.Button(
+            sidebar,
+            text="Save withdraw start row",
+            style="Quick.TButton",
+            command=self._save_withdraw_start_row,
+        ).pack(fill="x", pady=(0, 10))
+        ttk.Label(
+            sidebar,
+            text="Raise the withdraw start row if deposits need more space. Existing IDs are still skipped.",
+            style="Muted.TLabel",
+            wraplength=280,
+        ).pack(anchor="w", pady=(0, 10))
         for slot in GOOGLE_SHEET_SLOTS:
             ttk.Button(
                 sheet_btns,
@@ -1584,6 +1619,10 @@ class FinanceAutomationApp:
             self._apply_sheet_ids_to_fields(state["sheet_ids"])
         self._apply_brands_to_field(state.get("sheet_brands") or [])
         self.settings.sheet_brands = tuple(self._loaded_sheet_brands)
+        self._apply_start_rows_to_fields(
+            state.get("deposit_start_row"),
+            state.get("withdraw_start_row"),
+        )
         self._persist_google_sheets(remember_workspace=False)
         self._reset_workspace_view()
         self._update_workspace_caption()
@@ -1870,6 +1909,94 @@ class FinanceAutomationApp:
             self._save_current_workspace_state()
         return ids
 
+    def _apply_start_rows_to_fields(self, deposit, withdraw) -> None:
+        deposit_row, withdraw_row = normalize_sheet_start_rows(deposit, withdraw)
+        if hasattr(self, "deposit_start_row"):
+            self.deposit_start_row.set(str(deposit_row))
+        if hasattr(self, "withdraw_start_row"):
+            self.withdraw_start_row.set(str(withdraw_row))
+        self.settings.deposit_start_row = deposit_row
+        self.settings.withdraw_start_row = withdraw_row
+
+    def _parse_start_row(self, raw: object, label: str) -> int | None:
+        text = str(raw or "").strip()
+        try:
+            value = int(text)
+        except (TypeError, ValueError):
+            messagebox.showwarning(
+                f"{label} row required",
+                f"Enter a whole number for the {label.lower()} start row.",
+            )
+            return None
+        if value < 2 or value > 1_000_000:
+            messagebox.showwarning(
+                f"{label} row out of range",
+                f"Enter a {label.lower()} start row between 2 and 1000000.",
+            )
+            return None
+        return value
+
+    def _persist_start_rows(self, deposit: int, withdraw: int) -> tuple[int, int]:
+        deposit_row, withdraw_row = normalize_sheet_start_rows(deposit, withdraw)
+        persist_env_values(
+            {
+                "DEPOSIT_START_ROW": str(deposit_row),
+                "WITHDRAW_START_ROW": str(withdraw_row),
+            }
+        )
+        self.settings.deposit_start_row = deposit_row
+        self.settings.withdraw_start_row = withdraw_row
+        self._apply_start_rows_to_fields(deposit_row, withdraw_row)
+        if self.workspace_key:
+            save_workspace_state(
+                self.workspace_key,
+                deposit_start_row=deposit_row,
+                withdraw_start_row=withdraw_row,
+            )
+        return deposit_row, withdraw_row
+
+    def _save_deposit_start_row(self) -> None:
+        deposit = self._parse_start_row(self.deposit_start_row.get(), "Deposit")
+        if deposit is None:
+            return
+        withdraw = normalize_sheet_start_row(
+            self.withdraw_start_row.get(),
+            self.settings.withdraw_start_row or DEFAULT_WITHDRAW_START_ROW,
+        )
+        if deposit >= withdraw:
+            messagebox.showwarning(
+                "Deposit start is too high",
+                f"Deposits must start before withdrawals. Withdraw start is row {withdraw}. "
+                "Raise the withdraw start row first if deposits need more room.",
+            )
+            return
+        deposit, withdraw = self._persist_start_rows(deposit, withdraw)
+        self._append_log(
+            f"Saved deposit start row {deposit}. New deposits append from that row "
+            f"and stop before withdraw row {withdraw}."
+        )
+
+    def _save_withdraw_start_row(self) -> None:
+        withdraw = self._parse_start_row(self.withdraw_start_row.get(), "Withdraw")
+        if withdraw is None:
+            return
+        deposit = normalize_sheet_start_row(
+            self.deposit_start_row.get(),
+            self.settings.deposit_start_row or DEFAULT_DEPOSIT_START_ROW,
+        )
+        if withdraw <= deposit:
+            messagebox.showwarning(
+                "Withdraw start is too low",
+                f"Withdrawals must start after deposits. Deposit start is row {deposit}. "
+                "Choose a higher withdraw start row so the two blocks do not overlap.",
+            )
+            return
+        deposit, withdraw = self._persist_start_rows(deposit, withdraw)
+        self._append_log(
+            f"Saved withdraw start row {withdraw}. New withdrawals append from that row. "
+            f"Deposits stay in rows {deposit}–{withdraw - 1}."
+        )
+
     def _save_google_sheets(self) -> None:
         ids = self._persist_google_sheets()
         if not ids[0]:
@@ -1924,6 +2051,8 @@ class FinanceAutomationApp:
             settings.set_sheet_id_at(slot, sheet_id)
         apply_workspace_to_settings(settings, self._current_workspace_key() or self.workspace_key)
         settings.sheet_brands = tuple(self._brands_from_field())
+        settings.deposit_start_row = int(self.settings.deposit_start_row)
+        settings.withdraw_start_row = int(self.settings.withdraw_start_row)
         return settings
 
     def _scrape_ready(self, action: str) -> bool:
@@ -2021,7 +2150,8 @@ class FinanceAutomationApp:
             "Automated Run started. The browser will select the date, set Type to "
             "STAFF DEPOSIT and STAFF WITHDRAW, set Status to COMPLETED, read those "
             "Completed rows into the GUI, and send new IDs to the Google Sheet "
-            "(deposits from row 105, withdrawals from row 1024 on the day tab). "
+            f"(deposits from row {self.settings.deposit_start_row}, "
+            f"withdrawals from row {self.settings.withdraw_start_row} on the day tab). "
             "Deposit ATTACHMENT screenshots are used to fill BANK on deposit rows."
             f" The next scrape waits {seconds}s after this one finishes."
         )

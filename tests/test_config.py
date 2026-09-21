@@ -1,6 +1,8 @@
 import unittest
 
 from src.config import (
+    DEFAULT_DEPOSIT_START_ROW,
+    DEFAULT_WITHDRAW_START_ROW,
     GOOGLE_SHEET_SLOTS,
     LOGIN_ACCOUNT_SLOTS,
     empty_login_account,
@@ -12,6 +14,8 @@ from src.config import (
     login_slot,
     normalize_dashboard_url,
     normalize_google_sheet_id,
+    normalize_sheet_start_row,
+    normalize_sheet_start_rows,
 )
 
 
@@ -90,6 +94,17 @@ class LoginAccountTests(unittest.TestCase):
         self.assertEqual(google_sheet_env_key(3), "GOOGLE_SHEET_ID_3")
         self.assertEqual(google_sheet_env_key(5), "GOOGLE_SHEET_ID_5")
         self.assertEqual(tuple(GOOGLE_SHEET_SLOTS), (1, 2, 3, 4, 5))
+
+    def test_normalize_sheet_start_rows(self) -> None:
+        self.assertEqual(normalize_sheet_start_row("105", 200), 105)
+        self.assertEqual(normalize_sheet_start_row("nope", 105), 105)
+        self.assertEqual(normalize_sheet_start_row("1", 105), 105)
+        self.assertEqual(
+            normalize_sheet_start_rows("", ""),
+            (DEFAULT_DEPOSIT_START_ROW, DEFAULT_WITHDRAW_START_ROW),
+        )
+        self.assertEqual(normalize_sheet_start_rows(200, 3000), (200, 3000))
+        self.assertEqual(normalize_sheet_start_rows(2000, 1024), (2000, 2001))
 
 
 if __name__ == "__main__":
