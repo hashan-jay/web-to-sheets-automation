@@ -10,6 +10,7 @@ from src.mapper import (
     captured_brand,
     clean_name,
     is_withdraw,
+    normalize_sheet_id,
     sheet_brand_choices,
     sheet_game_choices,
     to_sheet_row,
@@ -18,7 +19,7 @@ from src.mapper import (
 from src.models import Transaction
 from src.scraper import scrape_transactions
 from src.tally import COMPLETED_STATUS, local_today, staff_scrape_types
-from src.sheets import WITHDRAW_FIRST_DATA_ROW, SheetClient, new_rows_only
+from src.sheets import WITHDRAW_FIRST_DATA_ROW, SheetClient, new_rows_only, sheet_open_error
 
 EventFn = Callable[[dict], None]
 
@@ -47,11 +48,17 @@ def _sheet_label(sheet: SheetClient) -> str:
 
 
 def _open_sheet(settings: Settings, slot: int, sheet_id: str) -> SheetClient:
-    sheet = SheetClient(
-        settings.google_credentials_path,
-        sheet_id,
-        settings.google_worksheet,
-    )
+    try:
+        sheet = SheetClient(
+            settings.google_credentials_path,
+            sheet_id,
+            settings.google_worksheet,
+        )
+    except Exception as exc:
+        mapped = sheet_open_error(exc, settings.google_credentials_path)
+        if mapped:
+            raise mapped from exc
+        raise
     sheet.slot = slot
     return sheet
 
@@ -294,18 +301,22 @@ def copy_pending_to_sheet(
         kind="log",
         message="Send will write any GUI record that is not on "
         + ", ".join(f"Sheet {slot}" for slot, _sheet_id in targets)
-        + " yet. To send should become 0.",
+        + " yet. Existing IDs are left unchanged. To send should become 0.",
     )
+    opened = 0
+    last_error = ""
     for slot, sheet_id in targets:
         try:
             sheet = _open_sheet(settings, slot, sheet_id)
         except Exception as exc:
+            last_error = str(exc)
             _emit(
                 on_event,
                 kind="log",
                 message=f"Sheet {slot}: could not open this Google Sheet: {exc}",
             )
             continue
+        opened += 1
         _emit(
             on_event,
             kind="log",
@@ -322,6 +333,20 @@ def copy_pending_to_sheet(
                 on_event,
                 one_by_one=one_by_one,
             )
+    if not opened:
+        detail = last_error or "Google Sheet could not be opened."
+        _emit(
+            on_event,
+            kind="log",
+            message=(
+                "No Google Sheet could be opened, so nothing was written. "
+                "Share the GUI sheet with the service account as Editor, then Send again."
+            ),
+        )
+        for txn in pending:
+            db.mark(txn.transaction_id, "failed", detail)
+            result.failed += 1
+            _emit(on_event, **txn_row_event(txn, "Failed", detail))
     return result
 
 
@@ -458,16 +483,20 @@ def sync_date_to_sheet(
         + ", ".join(f"Sheet {slot}" for slot, _sheet_id in targets)
         + ".",
     )
+    opened = 0
+    last_error = ""
     for slot, sheet_id in targets:
         try:
             sheet = _open_sheet(settings, slot, sheet_id)
         except Exception as exc:
+            last_error = str(exc)
             _emit(
                 on_event,
                 kind="log",
                 message=f"Sheet {slot}: could not open this Google Sheet: {exc}",
             )
             continue
+        opened += 1
         _emit(
             on_event,
             kind="log",
@@ -488,6 +517,20 @@ def sync_date_to_sheet(
             kind="log",
             message=f"{_sheet_label(sheet)}: sync finished.",
         )
+    if not opened:
+        detail = last_error or "Google Sheet could not be opened."
+        _emit(
+            on_event,
+            kind="log",
+            message=(
+                "Sync could not open any Google Sheet. Share the GUI sheet "
+                "with the service account as Editor, then Sync again."
+            ),
+        )
+        for txn in candidates:
+            db.mark(txn.transaction_id, "failed", detail)
+            result.failed += 1
+            _emit(on_event, **txn_row_event(txn, "Failed", detail))
     _emit(
         on_event,
         kind="done",
@@ -544,15 +587,17 @@ def _send_missing_day_rows(
             result.failed += 1
             _emit(on_event, **txn_row_event(txn, "Failed", str(exc)))
         return
-    existing_ids = sheet.existing_ids()
+    existing_ids = {normalize_sheet_id(item) for item in sheet.existing_ids()}
+    existing_ids.discard("")
     missing = new_rows_only(txns, existing_ids)
     queued = {
-        txn.transaction_id
+        normalize_sheet_id(txn.transaction_id)
         for txn in list(db.pending()) + list(db.by_status("failed"))
-        if txn.transaction_id
+        if normalize_sheet_id(txn.transaction_id)
     }
     for txn in txns:
-        if txn.transaction_id not in existing_ids or txn.transaction_id not in queued:
+        txn_id = normalize_sheet_id(txn.transaction_id)
+        if txn_id not in existing_ids or txn_id not in queued:
             continue
         db.mark(txn.transaction_id, "skipped", f"Already on Google Sheet tab {sheet.tab_title()}")
         result.skipped += 1
@@ -702,7 +747,14 @@ def _write_day_rows(
                 ),
             )
             try:
-                sheet.write_row(to_sheet_row(txn, settings, games=games))
+                sheet.write_row(
+                    to_sheet_row(
+                        txn,
+                        settings,
+                        games=games,
+                        columns=getattr(sheet, "columns", None),
+                    )
+                )
                 start = getattr(sheet, "last_write_start", 0)
                 if start:
                     detail = (
@@ -768,7 +820,15 @@ def _write_day_rows(
             if not group:
                 continue
             sheet.write_rows(
-                [to_sheet_row(txn, settings, games=games) for txn in group],
+                [
+                    to_sheet_row(
+                        txn,
+                        settings,
+                        games=games,
+                        columns=getattr(sheet, "columns", None),
+                    )
+                    for txn in group
+                ],
                 withdraw=withdraw_block,
             )
             written.extend(group)

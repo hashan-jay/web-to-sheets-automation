@@ -10,12 +10,14 @@ from src.mapper import (
     SHEET_COL_STAFF,
     clean_name,
     day_from_datetime,
+    detect_sheet_columns,
     first_brand_tag,
     MAX_SHEET_BRANDS,
     match_sheet_game,
     match_site_brand,
     normalize_brand,
     normalize_sheet_brands,
+    normalize_sheet_id,
     normalize_status,
     record_local_datetime,
     sheet_amount,
@@ -311,6 +313,62 @@ class MapperTests(unittest.TestCase):
             )[SHEET_COL_COMPANY],
             "FUCKSPIN",
         )
+
+    def test_detect_sheet_columns_uses_headers(self) -> None:
+        columns = detect_sheet_columns(
+            ["DAY", "DATE", "BANK", "DESCRIPTION", "AMOUNT", "STATUS", "ID", "COMPANY OWNER", "", "PLAYER"]
+        )
+        self.assertEqual(columns["id"], 6)
+        self.assertEqual(columns["date"], 1)
+        self.assertEqual(columns["company"], 7)
+        self.assertEqual(columns["player"], 9)
+        shifted = detect_sheet_columns(
+            ["Date", "Amount", "Status", "ID", "Username", "Name", "Brand", "Mobile", "BSB", "PayID"]
+        )
+        self.assertEqual(shifted["id"], 3)
+        self.assertEqual(shifted["player"], 4)
+        self.assertEqual(shifted["description"], 5)
+        self.assertEqual(shifted["company"], 6)
+        self.assertEqual(shifted["mobile"], 7)
+        self.assertEqual(shifted["bsb"], 8)
+        self.assertEqual(shifted["pay_id"], 9)
+
+    def test_to_sheet_row_follows_detected_headers(self) -> None:
+        settings = _settings()
+        settings.sheet_brands = ("CUNTWIN",)
+        txn = Transaction(
+            transaction_id="17120000999",
+            username="A1001",
+            name="[TAG] Jane Example",
+            bank_account_name="Jane Example",
+            amount="25",
+            datetime="2026-09-21 16:10",
+            status="STAFF DEPOSIT",
+            brand="CUNTWINVIPA",
+            mobile="0412345678",
+            bsb="062000",
+            pay_id="jane@bank",
+            method="Manual",
+        )
+        columns = detect_sheet_columns(
+            ["Date", "Amount", "Status", "ID", "Username", "Name", "Brand", "Mobile", "BSB", "PayID"]
+        )
+        row = to_sheet_row(txn, settings, columns=columns)
+        self.assertEqual(row[0], "2026-09-21 16:10")
+        self.assertEqual(row[1], "25")
+        self.assertEqual(row[2], "Deposit")
+        self.assertEqual(row[3], "17120000999")
+        self.assertEqual(row[4], "A1001")
+        self.assertEqual(row[5], "Jane Example")
+        self.assertEqual(row[6], "CUNTWIN")
+        self.assertEqual(row[7], "0412345678")
+        self.assertEqual(row[8], "062000")
+        self.assertEqual(row[9], "jane@bank")
+
+    def test_normalize_sheet_id_reads_scientific_notation(self) -> None:
+        self.assertEqual(normalize_sheet_id("17120000999"), "17120000999")
+        self.assertEqual(normalize_sheet_id("1.7120000999E10"), "17120000999")
+        self.assertEqual(normalize_sheet_id("ID"), "")
 
 
 if __name__ == "__main__":

@@ -10,12 +10,22 @@ from gspread.exceptions import APIError
 from src.config import service_account_email
 from src.errors import ConfigError
 from src.mapper import (
+    DEFAULT_SHEET_COLUMNS,
+    SHEET_COL_AMOUNT,
     SHEET_COL_BANK,
+    SHEET_COL_COMPANY,
     SHEET_COL_COUNT,
+    SHEET_COL_DATE,
     SHEET_COL_DAY,
+    SHEET_COL_DESCRIPTION,
+    SHEET_COL_ID,
+    SHEET_COL_PLAYER,
     SHEET_COL_STATUS,
     date_key,
+    detect_sheet_columns,
     is_withdraw,
+    looks_like_sheet_headers,
+    normalize_sheet_id,
     pad_sheet_row,
     sheet_tab_name,
     uses_group_d_games,
@@ -69,23 +79,25 @@ def ledger_write_batches(
     skip_columns: set[int] | frozenset[int] | None = None,
     first_data_row: int = 0,
 ) -> tuple[list[tuple[str, list[list[str]]]], int]:
-    """Split A–L into writable column runs that avoid locked cells."""
-    values = [pad_sheet_row(row) for row in rows]
+    """Split the cashbook into writable column runs that avoid locked cells."""
+    width = max(SHEET_COL_COUNT, max((len(row) for row in rows), default=SHEET_COL_COUNT))
+    values = [pad_sheet_row(row, width) for row in rows]
     skip = {int(index) for index in (skip_columns or set())}
     if SHEET_COL_BANK in skip:
         for row in values:
-            row[SHEET_COL_BANK] = ""
+            if len(row) > SHEET_COL_BANK:
+                row[SHEET_COL_BANK] = ""
     if first_data_row:
         start = max(start, first_data_row)
     end = start + len(values) - 1
     batches: list[tuple[str, list[list[str]]]] = []
     col = 0
-    while col < SHEET_COL_COUNT:
+    while col < width:
         if col in skip:
             col += 1
             continue
         run_start = col
-        while col < SHEET_COL_COUNT and col not in skip:
+        while col < width and col not in skip:
             col += 1
         run_end = col - 1
         range_name = f"{col_letter(run_start)}{start}:{col_letter(run_end)}{end}"
@@ -236,7 +248,7 @@ def writable_append_row(
         if cap and row > cap:
             return 0
         value = id_col[row - 1] if row <= len(id_col) else ""
-        if str(value).strip().isdigit():
+        if normalize_sheet_id(value):
             row += 1
             continue
         unlocked = next_unlocked_row(blocks, row, n_rows, cap, required)
@@ -276,6 +288,30 @@ def office_file_error(exc: Exception) -> ConfigError | None:
     )
 
 
+def sheet_open_error(exc: Exception, credentials_path: Path | None = None) -> ConfigError | None:
+    """Explain a 403/PermissionError so the GUI does not fail silently."""
+    office = office_file_error(exc)
+    if office:
+        return office
+    text = (str(exc) or type(exc).__name__).lower()
+    permission = isinstance(exc, PermissionError) or (
+        "does not have permission" in text
+        or "the caller does not have permission" in text
+        or "[403]" in text
+        or "permission_denied" in text
+    )
+    if not permission:
+        return None
+    email = service_account_email(Path(credentials_path)) if credentials_path else ""
+    email = email or "sheets-writer@finance-automation-507106.iam.gserviceaccount.com"
+    return ConfigError(
+        "The Google Sheet in the GUI is not shared with the writer account, "
+        "so scraped transactions cannot be added. Open that sheet → Share → "
+        f"add {email} as Editor. After it is shared, Send appends only IDs "
+        "that are not already on the day tab and does not overwrite existing rows."
+    )
+
+
 def protected_range_error(exc: Exception) -> ConfigError | None:
     text = str(exc)
     if "protected cell" not in text.lower() and "protected sheet" not in text.lower():
@@ -312,12 +348,18 @@ class SheetClient:
             self._fallback_title = (worksheet or "").strip()
             self._writer_email = service_account_email(Path(credentials_path))
             self._lock_cache: dict[str, list[LockedBlock]] = {}
+            self._layout_cache: dict[str, dict[str, int]] = {}
+            self.columns = dict(DEFAULT_SHEET_COLUMNS)
             if self._fallback_title:
                 self.ws = self.spreadsheet.worksheet(self._fallback_title)
             else:
                 self.ws = self.spreadsheet.sheet1
             self._apply_title_layout()
-        except APIError as exc:
+            self._apply_tab_layout()
+        except (APIError, PermissionError) as exc:
+            mapped = sheet_open_error(exc, credentials_path)
+            if mapped:
+                raise mapped from exc
             raise_if_office_file(exc)
             raise
 
@@ -337,9 +379,13 @@ class SheetClient:
         title = day_tab_candidates(tab)[0]
         try:
             self.ws = self.spreadsheet.add_worksheet(title=title, rows=2000, cols=16)
-        except APIError as exc:
+        except (APIError, PermissionError) as exc:
+            mapped = sheet_open_error(exc) or office_file_error(exc)
+            if mapped:
+                raise mapped from exc
             raise_if_office_file(exc)
             raise
+        self._apply_tab_layout()
         return self.ws
 
     def _apply_title_layout(self) -> None:
@@ -349,6 +395,55 @@ class SheetClient:
     def _apply_tab_layout(self) -> None:
         """Every date tab uses deposits from row 105 and withdrawals from 1024."""
         self._apply_title_layout()
+        self._detect_columns()
+
+    def _detect_columns(self) -> None:
+        title = ""
+        try:
+            title = self.tab_title()
+        except Exception:
+            title = ""
+        cached = getattr(self, "_layout_cache", {}).get(title)
+        if cached:
+            self.columns = dict(cached)
+            return
+        headers: list[str] = []
+        try:
+            heading = self.ws.row_values(LEDGER_FIRST_DATA_ROW - 1)
+            first = self.ws.row_values(1)
+            if looks_like_sheet_headers(heading):
+                headers = heading
+            elif looks_like_sheet_headers(first):
+                headers = first
+            else:
+                headers = heading or first
+        except Exception:
+            headers = []
+        columns = detect_sheet_columns(headers)
+        if not hasattr(self, "_layout_cache") or self._layout_cache is None:
+            self._layout_cache = {}
+        if title:
+            self._layout_cache[title] = columns
+        self.columns = columns
+
+    def _id_col(self) -> int:
+        return int((self.columns or DEFAULT_SHEET_COLUMNS).get("id", SHEET_COL_ID))
+
+    def _date_col(self) -> int:
+        return int((self.columns or DEFAULT_SHEET_COLUMNS).get("date", SHEET_COL_DATE))
+
+    def _required_write_cols(self) -> tuple[int, ...]:
+        cols = self.columns or DEFAULT_SHEET_COLUMNS
+        wanted = (
+            cols.get("date", SHEET_COL_DATE),
+            cols.get("description", SHEET_COL_DESCRIPTION),
+            cols.get("amount", SHEET_COL_AMOUNT),
+            cols.get("status", SHEET_COL_STATUS),
+            cols.get("id", SHEET_COL_ID),
+            cols.get("company", SHEET_COL_COMPANY),
+            cols.get("player", SHEET_COL_PLAYER),
+        )
+        return tuple(sorted({int(index) for index in wanted if int(index) >= 0}))
 
     def tab_title(self) -> str:
         return self.ws.title
@@ -361,8 +456,14 @@ class SheetClient:
         last_error: Exception | None = None
         for attempt in range(4):
             try:
-                return index_sheet_ids(self.ws.col_values(2), self.ws.col_values(7))
-            except APIError as exc:
+                return index_sheet_ids(
+                    self.ws.col_values(self._date_col() + 1),
+                    self.ws.col_values(self._id_col() + 1),
+                )
+            except (APIError, PermissionError) as exc:
+                mapped = sheet_open_error(exc) or office_file_error(exc)
+                if mapped:
+                    raise mapped from exc
                 raise_if_office_file(exc)
                 last_error = exc
                 if "429" not in str(exc) or attempt == 3:
@@ -371,14 +472,16 @@ class SheetClient:
         raise last_error or RuntimeError("Google Sheets read failed.")
 
     def next_empty_row(self, *, withdraw: bool = False, n_rows: int = 1) -> int:
-        ids = self.ws.col_values(7)
+        ids = self.ws.col_values(self._id_col() + 1)
         blocks = self._protected_blocks()
+        required = self._required_write_cols()
         if withdraw:
             return writable_append_row(
                 ids,
                 blocks,
                 first_data_row=WITHDRAW_FIRST_DATA_ROW,
                 n_rows=n_rows,
+                required=required,
             )
         return writable_append_row(
             ids,
@@ -386,6 +489,7 @@ class SheetClient:
             first_data_row=LEDGER_FIRST_DATA_ROW,
             n_rows=n_rows,
             last_data_row=WITHDRAW_FIRST_DATA_ROW - 1,
+            required=required,
         )
 
     def clear_bank_names(self) -> int:
@@ -446,7 +550,7 @@ class SheetClient:
                 end = start + len(rows) - 1
                 skip = ledger_skip_columns(skip_day, skip_bank)
                 locked = locked_columns_in_rows(self._protected_blocks(), start, end)
-                skip |= locked - set(REQUIRED_WRITE_COLS)
+                skip |= locked - set(self._required_write_cols())
                 batches, start = ledger_write_batches(
                     rows,
                     start,
@@ -596,7 +700,7 @@ def next_append_row(
             if last_data_row and row > last_data_row:
                 return 0
             value = id_col[row - 1] if row <= len(id_col) else ""
-            if not str(value).strip().isdigit():
+            if not normalize_sheet_id(value):
                 return max(row, first_data_row)
             row += 1
     first_allowed = header_row + 1 if header_row else 1
@@ -604,7 +708,7 @@ def next_append_row(
     for index, value in enumerate(id_col, start=1):
         if last_data_row and index > last_data_row:
             break
-        if str(value).strip().isdigit():
+        if normalize_sheet_id(value):
             last_data = index
     start = max(last_data + 1, first_allowed)
     if last_data_row and start > last_data_row:
@@ -613,7 +717,7 @@ def next_append_row(
 
 
 def bank_clear_range(ids: list[str]) -> tuple[int, int]:
-    rows = [index for index, item in enumerate(ids, start=1) if str(item).strip().isdigit()]
+    rows = [index for index, item in enumerate(ids, start=1) if normalize_sheet_id(item)]
     if not rows:
         return 0, 0
     return rows[0], rows[-1]
@@ -626,8 +730,8 @@ def index_sheet_ids(
     by_date: dict[str, set[str]] = {}
     length = max(len(datetimes), len(ids))
     for index in range(length):
-        txn_id = (ids[index] if index < len(ids) else "").strip()
-        if not txn_id.isdigit():
+        txn_id = normalize_sheet_id(ids[index] if index < len(ids) else "")
+        if not txn_id:
             continue
         all_ids.add(txn_id)
         day = date_key(datetimes[index] if index < len(datetimes) else "")
@@ -640,11 +744,12 @@ def new_rows_only(
 ) -> list[Transaction]:
     seen: set[str] = set()
     unique: list[Transaction] = []
+    known = {normalize_sheet_id(item) for item in existing_ids}
+    known.discard("")
     for txn in transactions:
-        if not txn.transaction_id or txn.transaction_id in existing_ids:
+        txn_id = normalize_sheet_id(txn.transaction_id)
+        if not txn_id or txn_id in known or txn_id in seen:
             continue
-        if txn.transaction_id in seen:
-            continue
-        seen.add(txn.transaction_id)
+        seen.add(txn_id)
         unique.append(txn)
     return unique

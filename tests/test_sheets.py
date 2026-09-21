@@ -21,6 +21,7 @@ from src.sheets import (
     parse_locked_blocks,
     protected_range_error,
     row_is_withdraw,
+    sheet_open_error,
     uses_ledger_start,
     uses_locked_day_column,
     writable_append_row,
@@ -34,6 +35,11 @@ class SheetDedupeTests(unittest.TestCase):
         extra = Transaction(transaction_id="17110853301", amount="10")
         rows = new_rows_only([first, again, extra], {"17110853300"})
         self.assertEqual([row.transaction_id for row in rows], ["17110853301"])
+        scientific = new_rows_only(
+            [Transaction(transaction_id="17110853300")],
+            {"1.71108533E10"},
+        )
+        self.assertEqual(scientific, [])
 
     def test_index_sheet_ids_groups_by_date(self) -> None:
         all_ids, by_date = index_sheet_ids(
@@ -71,6 +77,13 @@ class SheetDedupeTests(unittest.TestCase):
         self.assertIn("Protect sheets and ranges", str(locked))
         self.assertIn("row 105", str(locked))
         self.assertIsNone(protected_range_error(Exception("unrelated")))
+        denied = sheet_open_error(PermissionError())
+        self.assertIsInstance(denied, ConfigError)
+        self.assertIn("not shared", str(denied))
+        self.assertIn("sheets-writer@", str(denied))
+        denied_api = sheet_open_error(Exception("APIError: [403]: The caller does not have permission"))
+        self.assertIsInstance(denied_api, ConfigError)
+        self.assertIsNone(sheet_open_error(Exception("unrelated")))
 
     def test_september_ledger_starts_at_row_105(self) -> None:
         self.assertTrue(uses_ledger_start("GROUP U AUD SEPTEMBER 2026"))

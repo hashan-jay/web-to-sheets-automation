@@ -90,7 +90,14 @@ class LiveSheetWriter:
                     )
                 )
                 fill_deposit_banks(self.settings, [txn], self.on_event, choices=banks)
-                sheet.write_row(to_sheet_row(txn, self.settings, games=games))
+                sheet.write_row(
+                    to_sheet_row(
+                        txn,
+                        self.settings,
+                        games=games,
+                        columns=getattr(sheet, "columns", None),
+                    )
+                )
             except Exception as exc:
                 db.mark(txn.transaction_id, "failed", str(exc))
                 if self.on_event:

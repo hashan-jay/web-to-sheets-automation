@@ -193,7 +193,7 @@ from src.mapper import (
     record_local_datetime,
     sheet_tab_name,
 )
-from src.sheets import SheetClient
+from src.sheets import SheetClient, sheet_open_error
 from src.pipeline import (
     delete_transactions_for_date,
     process_new_notifications_only,
@@ -2241,8 +2241,12 @@ class FinanceAutomationApp:
                     }
                 )
             except Exception as exc:
+                mapped = sheet_open_error(exc, settings.google_credentials_path)
                 self.events.put(
-                    {"kind": "log", "message": f"Could not compare Google Sheet IDs: {exc}"}
+                    {
+                        "kind": "log",
+                        "message": f"Could not compare Google Sheet IDs: {mapped or exc}",
+                    }
                 )
 
         threading.Thread(target=work, name="sheet-unsent", daemon=True).start()

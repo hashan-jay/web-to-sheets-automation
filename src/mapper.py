@@ -327,43 +327,206 @@ SHEET_COL_UNUSED = 10
 SHEET_COL_STAFF = 11
 
 
+DEFAULT_SHEET_COLUMNS = {
+    "day": SHEET_COL_DAY,
+    "date": SHEET_COL_DATE,
+    "bank": SHEET_COL_BANK,
+    "description": SHEET_COL_DESCRIPTION,
+    "amount": SHEET_COL_AMOUNT,
+    "status": SHEET_COL_STATUS,
+    "id": SHEET_COL_ID,
+    "company": SHEET_COL_COMPANY,
+    "company_trf": SHEET_COL_COMPANY_TRF,
+    "player": SHEET_COL_PLAYER,
+    "unused": SHEET_COL_UNUSED,
+    "staff": SHEET_COL_STAFF,
+}
+
+# Header labels on the Google Sheet → transaction field written into that column.
+HEADER_ALIASES = {
+    "id": ("id", "transaction id", "txn id", "id transaction"),
+    "day": ("day",),
+    "date": ("date", "datetime", "date time", "time"),
+    "bank": ("bank", "bank name"),
+    "description": ("description", "desc", "acc name", "account name"),
+    "name": ("name",),
+    "amount": ("amount", "amt"),
+    "status": ("status", "type"),
+    "company": ("company", "company owner", "company name", "game"),
+    "brand": ("brand",),
+    "company_trf": ("company trf", "company transfer"),
+    "player": ("player", "username", "user"),
+    "staff": ("staff", "staff code"),
+    "mobile": ("mobile", "phone"),
+    "acc_no": ("acc no", "account no", "account number", "acc number"),
+    "bsb": ("bsb",),
+    "pay_id": ("payid", "pay id"),
+    "method": ("method",),
+    "created": ("created",),
+    "processed": ("processed",),
+    "bank_lock": ("banklock", "bank lock"),
+}
+
+CASHBOOK_FIELDS = (
+    "day",
+    "date",
+    "bank",
+    "description",
+    "amount",
+    "status",
+    "id",
+    "company",
+    "player",
+)
+
+
 def empty_sheet_row() -> list[str]:
     return [""] * SHEET_COL_COUNT
 
 
-def pad_sheet_row(row: list[str]) -> list[str]:
-    padded = list(row) + [""] * (SHEET_COL_COUNT - len(row))
-    return padded[:SHEET_COL_COUNT]
+def pad_sheet_row(row: list[str], width: int = 0) -> list[str]:
+    size = max(SHEET_COL_COUNT, int(width or 0), len(row))
+    padded = list(row) + [""] * (size - len(row))
+    return padded[:size]
+
+
+def normalize_header(value: object) -> str:
+    return " ".join(
+        str(value or "").strip().lower().replace("_", " ").replace("-", " ").split()
+    )
+
+
+def normalize_sheet_id(value: object) -> str:
+    """Transaction ID as written on the sheet, including numeric scientific notation."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if text.isdigit():
+        return text
+    compact = text.replace(",", "").replace(" ", "")
+    if compact.isdigit():
+        return compact
+    try:
+        number = float(compact)
+    except ValueError:
+        return ""
+    if number.is_integer() and number > 0:
+        as_int = str(int(number))
+        if len(as_int) >= 6:
+            return as_int
+    return ""
+
+
+def looks_like_sheet_headers(headers: list[object] | tuple[object, ...] | None) -> bool:
+    wanted = {"id", "date", "day", "amount", "description", "status", "player"}
+    found = {normalize_header(item) for item in (headers or [])}
+    return bool(found & wanted)
+
+
+def detect_sheet_columns(headers: list[object] | tuple[object, ...] | None) -> dict[str, int]:
+    """Map Google Sheet header labels onto transaction fields.
+
+    Unknown extra columns stay unused. Missing cashbook fields keep the
+    default A–L positions when those cells are not already taken.
+    """
+    found: dict[str, int] = {}
+    for index, raw in enumerate(headers or []):
+        key = normalize_header(raw)
+        if not key:
+            continue
+        for field, aliases in HEADER_ALIASES.items():
+            if key in aliases and field not in found:
+                found[field] = index
+                break
+    if "company" not in found and "brand" in found:
+        found["company"] = found["brand"]
+    if "description" not in found and "name" in found:
+        found["description"] = found["name"]
+    if not looks_like_sheet_headers(headers):
+        return dict(DEFAULT_SHEET_COLUMNS)
+    used = set(found.values())
+    for field, column in DEFAULT_SHEET_COLUMNS.items():
+        if field in found or column in used:
+            continue
+        found[field] = column
+        used.add(column)
+    return found
+
+
+def sheet_company_value(
+    txn: Transaction,
+    settings: Settings,
+    games: tuple[str, ...] | None = None,
+) -> str:
+    brands = sheet_brand_choices(settings)
+    if brands:
+        return match_site_brand(txn.brand, brands)
+    if games:
+        return match_sheet_game(txn.brand, games)
+    return normalize_brand(txn.brand, settings)
+
+
+def sheet_field_values(
+    txn: Transaction,
+    settings: Settings,
+    games: tuple[str, ...] | None = None,
+) -> dict[str, str]:
+    when = record_local_datetime(txn.datetime, txn.created, txn.processed)
+    company = sheet_company_value(txn, settings, games)
+    username = (txn.username or "").strip()
+    return {
+        "day": day_from_datetime(when),
+        "date": when,
+        "bank": sheet_bank(txn, settings),
+        "description": sheet_description(txn),
+        "name": clean_name(txn.bank_account_name or txn.name),
+        "amount": sheet_amount(txn.amount, txn.status),
+        "status": sheet_status(txn.status),
+        "id": txn.transaction_id,
+        "company": company,
+        "brand": company,
+        "company_trf": "",
+        "player": username,
+        "username": username,
+        "staff": "",
+        "unused": "",
+        "mobile": (txn.mobile or "").strip(),
+        "acc_no": (txn.bank_account_number or "").strip(),
+        "bsb": (txn.bsb or "").strip(),
+        "pay_id": (txn.pay_id or "").strip(),
+        "method": (txn.method or "").strip(),
+        "created": record_local_datetime(txn.created),
+        "processed": record_local_datetime(txn.processed),
+        "bank_lock": (txn.bank_lock or "").strip(),
+    }
 
 
 def to_sheet_row(
     txn: Transaction,
     settings: Settings,
     games: tuple[str, ...] | None = None,
+    columns: dict[str, int] | None = None,
 ) -> list[str]:
-    """Write deposit and withdraw onto the same A-L columns.
+    """Write one transaction onto the Google Sheet columns.
 
+    Default cashbook:
     A DAY | B DATE | C BANK | D DESCRIPTION | E AMOUNT | F STATUS | G ID |
     H COMPANY OWNER / COMPANY NAME | I COMPANY TRF | J PLAYER | K *(blank)* | L STAFF
+
+    When `columns` comes from the live tab headers, extra fields such as
+    mobile, BSB, and PayID are written only into those matching headers.
+    Existing rows are never updated by this function.
     """
-    when = record_local_datetime(txn.datetime, txn.created, txn.processed)
-    row = empty_sheet_row()
-    row[SHEET_COL_DAY] = day_from_datetime(when)
-    row[SHEET_COL_DATE] = when
-    row[SHEET_COL_BANK] = sheet_bank(txn, settings)
-    row[SHEET_COL_DESCRIPTION] = sheet_description(txn)
-    row[SHEET_COL_AMOUNT] = sheet_amount(txn.amount, txn.status)
-    row[SHEET_COL_STATUS] = sheet_status(txn.status)
-    row[SHEET_COL_ID] = txn.transaction_id
-    brands = sheet_brand_choices(settings)
-    if brands:
-        row[SHEET_COL_COMPANY] = match_site_brand(txn.brand, brands)
-    elif games:
-        row[SHEET_COL_COMPANY] = match_sheet_game(txn.brand, games)
-    else:
-        row[SHEET_COL_COMPANY] = normalize_brand(txn.brand, settings)
-    row[SHEET_COL_COMPANY_TRF] = ""
-    row[SHEET_COL_PLAYER] = (txn.username or "").strip()
-    row[SHEET_COL_UNUSED] = ""
-    row[SHEET_COL_STAFF] = ""
+    fields = sheet_field_values(txn, settings, games)
+    cols = dict(columns or DEFAULT_SHEET_COLUMNS)
+    width = max(SHEET_COL_COUNT, max(cols.values(), default=SHEET_COL_COUNT) + 1)
+    row = [""] * width
+    for field, column in cols.items():
+        if field not in fields:
+            continue
+        if column < 0:
+            continue
+        if column >= len(row):
+            row.extend([""] * (column + 1 - len(row)))
+        row[column] = fields[field]
     return row

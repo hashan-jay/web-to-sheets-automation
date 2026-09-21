@@ -146,6 +146,38 @@ class SendStaffRowsTests(unittest.TestCase):
             ],
         )
 
+    def test_send_marks_failed_when_sheet_cannot_open(self) -> None:
+        events: list[dict] = []
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            settings = _settings(
+                database_path=Path(folder) / "gathering.db",
+                google_sheet_id="1lpVFyp1c7mFw9iwttY4LF8mXRJBeA2thLZcNFjpH3_E",
+                filter_date_from="2026-09-21",
+            )
+            db = GatheringDB(settings.database_path)
+            db.ingest(
+                [
+                    Transaction(
+                        transaction_id="17120000020",
+                        amount="12",
+                        datetime="2026-09-21 11:00",
+                        status="STAFF DEPOSIT",
+                    )
+                ]
+            )
+            with (
+                patch(
+                    "src.pipeline._open_sheet",
+                    side_effect=PermissionError("The caller does not have permission"),
+                ),
+                patch("src.config.Settings.require_sheets", return_value=None),
+            ):
+                result = copy_pending_to_sheet(settings, db, on_event=events.append)
+        self.assertEqual(result.copied, 0)
+        self.assertEqual(result.failed, 1)
+        self.assertEqual(db.by_status("failed")[0].transaction_id, "17120000020")
+        self.assertTrue(any("could not open" in str(item.get("message") or "") for item in events))
+
 
 if __name__ == "__main__":
     unittest.main()
