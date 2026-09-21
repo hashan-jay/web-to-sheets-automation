@@ -8,7 +8,9 @@ from src.sheets import (
     WITHDRAW_FIRST_DATA_ROW,
     bank_clear_range,
     day_tab_candidates,
+    find_day_worksheet,
     index_sheet_ids,
+    sheets_retry_wait,
     ledger_skip_columns,
     ledger_write_batches,
     ledger_write_plan,
@@ -62,6 +64,23 @@ class SheetDedupeTests(unittest.TestCase):
         self.assertEqual(day_tab_candidates("29"), ["29"])
         self.assertEqual(day_tab_candidates("9"), ["9", "09"])
         self.assertEqual(day_tab_candidates("09"), ["9", "09"])
+
+    def test_sheets_retry_wait_is_short(self) -> None:
+        self.assertEqual(sheets_retry_wait(0), 2.0)
+        self.assertEqual(sheets_retry_wait(1), 4.0)
+        self.assertEqual(sheets_retry_wait(2), 8.0)
+        self.assertEqual(sheets_retry_wait(9), 8.0)
+
+    def test_find_day_worksheet_uses_provided_list(self) -> None:
+        class Fake:
+            def __init__(self, title: str) -> None:
+                self.title = title
+
+            def worksheets(self):
+                raise AssertionError("should use the cached worksheet list")
+
+        found = find_day_worksheet(Fake("x"), "21", [Fake("21")])
+        self.assertEqual(found.title, "21")
 
     def test_office_file_error_explains_xlsx(self) -> None:
         mapped = office_file_error(

@@ -274,9 +274,10 @@ def day_tab_candidates(day_number: str) -> list[str]:
     return names
 
 
-def find_day_worksheet(spreadsheet, day_number: str):
+def find_day_worksheet(spreadsheet, day_number: str, worksheets=None):
     wanted = {name.lower() for name in day_tab_candidates(day_number)}
-    for worksheet in spreadsheet.worksheets():
+    items = worksheets if worksheets is not None else spreadsheet.worksheets()
+    for worksheet in items:
         if worksheet.title.strip().lower() in wanted:
             return worksheet
     return None
@@ -360,6 +361,7 @@ class SheetClient:
             self._date_col_cache: dict[str, list[str]] = {}
             self._worksheets = None
             self._columns_ready = False
+            self._lock_meta_loaded = False
             self.columns = dict(DEFAULT_SHEET_COLUMNS)
             if self._fallback_title:
                 self.ws = self.spreadsheet.worksheet(self._fallback_title)
@@ -416,7 +418,10 @@ class SheetClient:
     def _apply_tab_layout(self) -> None:
         """Every date tab uses deposits from row 105 and withdrawals from 1024."""
         self._apply_title_layout()
+        if self._columns_ready and self.columns:
+            return
         self._detect_columns()
+        self._columns_ready = True
 
     def _detect_columns(self) -> None:
         title = ""
@@ -469,6 +474,50 @@ class SheetClient:
     def tab_title(self) -> str:
         return self.ws.title
 
+    def _column_cache_key(self) -> str:
+        return str(getattr(self.ws, "id", "") or self.tab_title())
+
+    def _id_values(self) -> list[str]:
+        key = self._column_cache_key()
+        cached = self._id_col_cache.get(key)
+        if cached is not None:
+            return cached
+        values = list(self.ws.col_values(self._id_col() + 1))
+        self._id_col_cache[key] = values
+        return values
+
+    def _date_values(self) -> list[str]:
+        key = self._column_cache_key()
+        cached = self._date_col_cache.get(key)
+        if cached is not None:
+            return cached
+        values = list(self.ws.col_values(self._date_col() + 1))
+        self._date_col_cache[key] = values
+        return values
+
+    def _remember_written_rows(self, rows: list[list[str]], start: int) -> None:
+        """Keep ID/date caches in sync after a batch write so we do not re-read the sheet."""
+        if start < 1:
+            return
+        key = self._column_cache_key()
+        ids = self._id_col_cache.get(key)
+        dates = self._date_col_cache.get(key)
+        if ids is None and dates is None:
+            return
+        id_idx = self._id_col()
+        date_idx = self._date_col()
+        for offset, row in enumerate(rows):
+            padded = pad_sheet_row(row)
+            pos = start + offset - 1
+            if ids is not None:
+                while len(ids) <= pos:
+                    ids.append("")
+                ids[pos] = padded[id_idx] if id_idx < len(padded) else ""
+            if dates is not None:
+                while len(dates) <= pos:
+                    dates.append("")
+                dates[pos] = padded[date_idx] if date_idx < len(padded) else ""
+
     def existing_ids(self) -> set[str]:
         ids, _by_date = self.id_index()
         return ids
@@ -477,10 +526,7 @@ class SheetClient:
         last_error: Exception | None = None
         for attempt in range(4):
             try:
-                return index_sheet_ids(
-                    self.ws.col_values(self._date_col() + 1),
-                    self.ws.col_values(self._id_col() + 1),
-                )
+                return index_sheet_ids(self._date_values(), self._id_values())
             except (APIError, PermissionError) as exc:
                 mapped = sheet_open_error(exc) or office_file_error(exc)
                 if mapped:
@@ -489,11 +535,11 @@ class SheetClient:
                 last_error = exc
                 if "429" not in str(exc) or attempt == 3:
                     raise
-                time.sleep(20 * (attempt + 1))
+                time.sleep(sheets_retry_wait(attempt))
         raise last_error or RuntimeError("Google Sheets read failed.")
 
     def next_empty_row(self, *, withdraw: bool = False, n_rows: int = 1) -> int:
-        ids = self.ws.col_values(self._id_col() + 1)
+        ids = self._id_values()
         blocks = self._protected_blocks()
         required = self._required_write_cols()
         if withdraw:
@@ -535,7 +581,7 @@ class SheetClient:
                 last_error = exc
                 if "429" not in str(exc) or attempt == 3:
                     raise
-                time.sleep(20 * (attempt + 1))
+                time.sleep(sheets_retry_wait(attempt))
         raise last_error or RuntimeError("Google Sheets bank-name clear failed.")
 
     def write_row(self, row: list[str]) -> int:
@@ -583,6 +629,7 @@ class SheetClient:
                 self.last_write_start = start
                 self._ensure_row_capacity(start + len(rows) - 1)
                 self._push_batches(batches)
+                self._remember_written_rows(rows, start)
                 self._skip_day_column = skip_day
                 self._skip_bank_column = skip_bank
                 if skip_day and not self._ledger_start and not withdraw:
@@ -600,6 +647,7 @@ class SheetClient:
                     self._skip_day_column = True
                     self._skip_bank_column = True
                     getattr(self, "_lock_cache", {}).pop(self.tab_title(), None)
+                    self._lock_meta_loaded = False
                     if not withdraw:
                         self._ledger_start = LEDGER_FIRST_DATA_ROW
                     last_error = locked
@@ -609,7 +657,7 @@ class SheetClient:
                 last_error = exc
                 if "429" not in str(exc) or attempt == 3:
                     raise
-                time.sleep(20 * (attempt + 1))
+                time.sleep(sheets_retry_wait(attempt))
         raise last_error or RuntimeError("Google Sheets write failed.")
 
     def _protected_blocks(self) -> list[LockedBlock]:
@@ -623,22 +671,33 @@ class SheetClient:
         cached = self._lock_cache.get(title)
         if cached is not None:
             return cached
-        blocks: list[LockedBlock] = []
+        self._load_lock_cache()
+        return self._lock_cache.get(title, [])
+
+    def _load_lock_cache(self) -> None:
+        if getattr(self, "_lock_meta_loaded", False):
+            return
         try:
             meta = self.spreadsheet.fetch_sheet_metadata(
                 params={
                     "fields": "sheets(properties(sheetId,title),protectedRanges)"
                 }
             )
-            blocks = parse_locked_blocks(
-                meta,
-                int(getattr(self.ws, "id", 0) or 0),
-                getattr(self, "_writer_email", ""),
-            )
+            email = getattr(self, "_writer_email", "")
+            for sheet in meta.get("sheets") or []:
+                props = sheet.get("properties") or {}
+                tab = str(props.get("title") or "")
+                sid = int(props.get("sheetId") or 0)
+                self._lock_cache[tab] = parse_locked_blocks(meta, sid, email)
+            self._lock_meta_loaded = True
         except Exception:
-            blocks = []
-        self._lock_cache[title] = blocks
-        return blocks
+            title = ""
+            try:
+                title = self.tab_title()
+            except Exception:
+                title = ""
+            self._lock_cache.setdefault(title, [])
+            self._lock_meta_loaded = True
 
     def _push_batches(self, batches: list[tuple[str, list[list[str]]]]) -> None:
         if len(batches) == 1:

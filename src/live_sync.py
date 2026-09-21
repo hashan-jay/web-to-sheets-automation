@@ -84,11 +84,8 @@ class LiveSheetWriter:
                 continue
             games = self._games.get(int(getattr(sheet, "slot", 0) or 0))
             try:
-                banks = tuple(
-                    dict.fromkeys(
-                        sheet_bank_choices(self.settings) + discover_bank_choices(sheet)
-                    )
-                )
+                configured = sheet_bank_choices(self.settings)
+                banks = configured if configured else discover_bank_choices(sheet)
                 fill_deposit_banks(self.settings, [txn], self.on_event, choices=banks)
                 sheet.write_row(
                     to_sheet_row(

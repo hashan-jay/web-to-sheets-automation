@@ -98,10 +98,12 @@ class DepositBankTests(unittest.TestCase):
             ws = FakeWs()
             spreadsheet = FakeSpreadsheet()
 
+        sheet = FakeSheet()
         self.assertIn(
             "Bank ANZ Plus LEANNE MARY HUMPHREYS (ANZ PLUS)",
-            discover_bank_choices(FakeSheet()),
+            discover_bank_choices(sheet),
         )
+        self.assertEqual(discover_bank_choices(sheet), sheet._bank_choices)
 
     def test_lookup_attachment_url_keeps_existing(self) -> None:
         txn = Transaction(

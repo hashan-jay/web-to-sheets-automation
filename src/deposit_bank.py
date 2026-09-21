@@ -280,7 +280,7 @@ def fill_deposit_banks(
         return 0
     cache: dict[str, str] = {}
     matched = 0
-    workers = min(4, max(1, len(deposits)))
+    workers = min(8, max(1, len(deposits)))
     _emit(
         on_event,
         kind="log",
@@ -509,10 +509,12 @@ _BANK_HEADER = {"BANK", "BANK ACCOUNT", "DAY", "ACCOUNT", "ACCOUNT NAME"}
 
 def discover_bank_choices(sheet) -> tuple[str, ...]:
     """Learn BANK dropdown labels from the open spreadsheet when possible."""
+    cached = getattr(sheet, "_bank_choices", None)
+    if cached is not None:
+        return cached
     found: list[str] = []
     spreadsheet = getattr(sheet, "spreadsheet", None)
     ws = getattr(sheet, "ws", None)
-    current_title = str(getattr(ws, "title", "") or "").strip().lower()
     try:
         if ws is not None:
             found.extend(_clean_bank_labels(ws.col_values(3)[:400]))
@@ -520,8 +522,14 @@ def discover_bank_choices(sheet) -> tuple[str, ...]:
     except Exception:
         pass
     try:
-        if spreadsheet is not None:
-            for worksheet in spreadsheet.worksheets():
+        worksheets = None
+        getter = getattr(sheet, "_cached_worksheets", None)
+        if callable(getter):
+            worksheets = getter()
+        elif spreadsheet is not None:
+            worksheets = spreadsheet.worksheets()
+        if worksheets:
+            for worksheet in worksheets:
                 title = str(worksheet.title or "").strip().lower()
                 if title in {"banks", "bank", "dropdown", "dropdowns", "bank accounts"}:
                     for row in worksheet.get_all_values()[:400]:
@@ -529,20 +537,11 @@ def discover_bank_choices(sheet) -> tuple[str, ...]:
     except Exception:
         pass
     unique = _unique_bank_labels(found)
-    if len(unique) >= 2 or spreadsheet is None:
-        return unique
     try:
-        for worksheet in spreadsheet.worksheets():
-            title = str(worksheet.title or "").strip().lower()
-            if not title.isdigit() or title == current_title:
-                continue
-            try:
-                found.extend(_clean_bank_labels(worksheet.col_values(3)[:200]))
-            except Exception:
-                pass
+        sheet._bank_choices = unique
     except Exception:
         pass
-    return _unique_bank_labels(found)
+    return unique
 
 
 def _unique_bank_labels(found: list[str]) -> tuple[str, ...]:

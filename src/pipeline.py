@@ -676,6 +676,7 @@ def _send_missing_day_rows(
         on_event,
         action="Copied",
         one_by_one=one_by_one,
+        known_ids=existing_ids,
     )
 
 
@@ -689,6 +690,7 @@ def _write_day_rows(
     on_event: EventFn | None,
     action: str,
     one_by_one: bool = False,
+    known_ids: set[str] | None = None,
 ) -> None:
     try:
         sheet.use_day(day)
@@ -698,7 +700,7 @@ def _write_day_rows(
             result.failed += 1
             _emit(on_event, **txn_row_event(txn, "Failed", str(exc)))
         return
-    existing_ids = sheet.existing_ids()
+    existing_ids = known_ids if known_ids is not None else sheet.existing_ids()
     to_copy = new_rows_only(txns, existing_ids)
     skipped_ids = {txn.transaction_id for txn in txns} - {
         txn.transaction_id for txn in to_copy
@@ -753,9 +755,8 @@ def _write_day_rows(
                 + "."
             ),
         )
-    banks = tuple(
-        dict.fromkeys(sheet_bank_choices(settings) + discover_bank_choices(sheet))
-    )
+    configured = sheet_bank_choices(settings)
+    banks = configured if configured else discover_bank_choices(sheet)
     fill_deposit_banks(settings, to_copy, on_event, choices=banks)
     detail = (
         f"Row appended to Google Sheet tab {sheet.tab_title()}"
@@ -966,7 +967,17 @@ def _sync_one_day(
         #_blank_sheet_bank(sheet, on_event)
         return
     before = result.copied
-    _write_day_rows(settings, db, sheet, day, missing, result, on_event, action="Restored")
+    _write_day_rows(
+        settings,
+        db,
+        sheet,
+        day,
+        missing,
+        result,
+        on_event,
+        action="Restored",
+        known_ids=existing_ids,
+    )
     restored = result.copied - before
     still_missing = max(0, len(missing) - restored)
     _emit(

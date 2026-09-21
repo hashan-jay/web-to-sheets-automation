@@ -2090,7 +2090,7 @@ class FinanceAutomationApp:
                 else ""
             )
             + (
-                " New extracted records will be sent to the Google Sheet one by one."
+                " New extracted records will be sent to the Google Sheet in one batch write."
                 if write_sheet
                 else ""
             )
@@ -2101,7 +2101,7 @@ class FinanceAutomationApp:
                 write_sheet=write_sheet,
                 quiet=True,
                 once=False,
-                one_by_one=write_sheet,
+                one_by_one=False,
             )
             if not started:
                 self._schedule_next_auto()
@@ -2281,7 +2281,7 @@ class FinanceAutomationApp:
                 scrape=True,
                 write_sheet=write_sheet,
                 once=True,
-                one_by_one=write_sheet,
+                one_by_one=False,
             )
         except Exception as exc:
             self._single_run_active = False
