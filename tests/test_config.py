@@ -59,6 +59,10 @@ class LoginAccountTests(unittest.TestCase):
             normalize_dashboard_url("https://other.example.com"),
             "https://other.example.com/#transactions",
         )
+        self.assertEqual(
+            normalize_dashboard_url("https://skgaming23.as6868.com/#admins"),
+            "https://skgaming23.as6868.com/#transactions",
+        )
         self.assertEqual(normalize_dashboard_url(""), "")
 
     def test_normalize_google_sheet_id(self) -> None:

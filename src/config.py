@@ -91,11 +91,13 @@ def normalize_dashboard_url(raw: object) -> str:
         return ""
     if not url.startswith(("http://", "https://")):
         url = "https://" + url
-    if "#login" in url:
-        url = url.replace("#login", "#transactions")
-    elif "#" not in url:
-        url = url.rstrip("/") + "/#transactions"
-    return url
+    if "#" in url:
+        base, marker = url.split("#", 1)
+        marker = marker.strip().split("?", 1)[0].lower()
+        if marker in {"", "login", "admins", "admin", "home", "dashboard"}:
+            return base.rstrip("/") + "/#transactions"
+        return url
+    return url.rstrip("/") + "/#transactions"
 
 
 def load_login_accounts() -> list[dict[str, str]]:
@@ -310,7 +312,7 @@ class Settings:
     def load(cls) -> Settings:
         _load_env()
         return cls(
-            dashboard_url=os.getenv("DASHBOARD_URL", "").strip(),
+            dashboard_url=normalize_dashboard_url(os.getenv("DASHBOARD_URL", "")),
             dashboard_username=os.getenv("DASHBOARD_USERNAME", "").strip(),
             dashboard_password=os.getenv("DASHBOARD_PASSWORD", "").strip(),
             dashboard_2fa=os.getenv("DASHBOARD_2FA", "").strip(),

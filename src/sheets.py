@@ -135,6 +135,13 @@ def uses_ledger_start(spreadsheet_title: str) -> bool:
 UNBOUNDED_ROW = 1_000_000
 # Date, description, amount, status, ID, company, player — never skip these if writable.
 REQUIRED_WRITE_COLS = (1, 3, 4, 5, 6, 7, 9)
+WRITE_RETRY_WAITS = (2.0, 4.0, 8.0)
+
+
+def sheets_retry_wait(attempt: int) -> float:
+    if 0 <= int(attempt) < len(WRITE_RETRY_WAITS):
+        return WRITE_RETRY_WAITS[int(attempt)]
+    return WRITE_RETRY_WAITS[-1]
 
 
 @dataclass(frozen=True)
@@ -349,13 +356,18 @@ class SheetClient:
             self._writer_email = service_account_email(Path(credentials_path))
             self._lock_cache: dict[str, list[LockedBlock]] = {}
             self._layout_cache: dict[str, dict[str, int]] = {}
+            self._id_col_cache: dict[str, list[str]] = {}
+            self._date_col_cache: dict[str, list[str]] = {}
+            self._worksheets = None
+            self._columns_ready = False
             self.columns = dict(DEFAULT_SHEET_COLUMNS)
             if self._fallback_title:
                 self.ws = self.spreadsheet.worksheet(self._fallback_title)
+                self._apply_title_layout()
+                self._apply_tab_layout()
             else:
                 self.ws = self.spreadsheet.sheet1
-            self._apply_title_layout()
-            self._apply_tab_layout()
+                self._apply_title_layout()
         except (APIError, PermissionError) as exc:
             mapped = sheet_open_error(exc, credentials_path)
             if mapped:
@@ -371,10 +383,12 @@ class SheetClient:
                 self._apply_tab_layout()
                 return self.ws
             raise ConfigError("Cannot choose a Google Sheet tab: the transaction has no date.")
-        found = find_day_worksheet(self.spreadsheet, tab)
+        found = find_day_worksheet(self.spreadsheet, tab, self._cached_worksheets())
         if found:
+            same = getattr(self.ws, "id", None) == getattr(found, "id", None)
             self.ws = found
-            self._apply_tab_layout()
+            if not same or not self._columns_ready:
+                self._apply_tab_layout()
             return self.ws
         title = day_tab_candidates(tab)[0]
         try:
@@ -385,8 +399,15 @@ class SheetClient:
                 raise mapped from exc
             raise_if_office_file(exc)
             raise
+        if self._worksheets is not None:
+            self._worksheets.append(self.ws)
         self._apply_tab_layout()
         return self.ws
+
+    def _cached_worksheets(self):
+        if self._worksheets is None:
+            self._worksheets = list(self.spreadsheet.worksheets())
+        return self._worksheets
 
     def _apply_title_layout(self) -> None:
         self._ledger_start = LEDGER_FIRST_DATA_ROW

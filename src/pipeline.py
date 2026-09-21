@@ -134,6 +134,9 @@ def gather_from_dashboard(
             ),
         )
     known = db.known_ids()
+    failed_ids = {
+        txn.transaction_id for txn in db.by_status("failed") if txn.transaction_id
+    }
     capture = scrape_transactions(
         settings, limit=limit, on_event=on_event, once=once, session=session
     )
@@ -142,6 +145,13 @@ def gather_from_dashboard(
     result.website_records = capture.website_records
     result.website_total = capture.website_total
     result.new_notifications = db.ingest(transactions, source="dashboard")
+    recovered = [
+        txn.transaction_id
+        for txn in transactions
+        if txn.transaction_id in failed_ids
+    ]
+    if recovered:
+        db.requeue(recovered)
     _emit(
         on_event,
         kind="website_tally",
@@ -162,8 +172,22 @@ def gather_from_dashboard(
             ),
         )
     new_txns = [txn for txn in transactions if txn.transaction_id not in known]
+    recovered_txns = [
+        txn for txn in transactions if txn.transaction_id in failed_ids
+    ]
     for txn in new_txns:
         _emit(on_event, **txn_row_event(txn, "Gathered", "Read from dashboard"))
+    for txn in recovered_txns:
+        if txn.transaction_id in {item.transaction_id for item in new_txns}:
+            continue
+        _emit(
+            on_event,
+            **txn_row_event(
+                txn,
+                "Gathered",
+                "Restored to the GUI after a Google Sheet send failure",
+            ),
+        )
     already = result.scraped - len(new_txns)
     if already > 0:
         _emit(
@@ -334,19 +358,16 @@ def copy_pending_to_sheet(
                 one_by_one=one_by_one,
             )
     if not opened:
-        detail = last_error or "Google Sheet could not be opened."
         _emit(
             on_event,
             kind="log",
             message=(
-                "No Google Sheet could be opened, so nothing was written. "
-                "Share the GUI sheet with the service account as Editor, then Send again."
+                "No Google Sheet could be opened, so scraped rows were kept in the GUI "
+                "and not written. Share the GUI sheet with the service account as Editor, "
+                "then Send. Existing sheet rows were not changed."
+                + (f" ({last_error})" if last_error else "")
             ),
         )
-        for txn in pending:
-            db.mark(txn.transaction_id, "failed", detail)
-            result.failed += 1
-            _emit(on_event, **txn_row_event(txn, "Failed", detail))
     return result
 
 
@@ -377,18 +398,29 @@ def run_pipeline(
         totals.scraped = gathered.scraped
         totals.new_notifications = gathered.new_notifications
     if write_sheet:
-        copied = copy_pending_to_sheet(
-            settings,
-            db,
-            on_event,
-            dry_run=dry_run,
-            only_ids=only_ids,
-            one_by_one=one_by_one,
-        )
-        totals.copied = copied.copied
-        totals.skipped = copied.skipped
-        totals.failed = copied.failed
-        totals.previewed = copied.previewed
+        try:
+            copied = copy_pending_to_sheet(
+                settings,
+                db,
+                on_event,
+                dry_run=dry_run,
+                only_ids=only_ids,
+                one_by_one=one_by_one,
+            )
+            totals.copied = copied.copied
+            totals.skipped = copied.skipped
+            totals.failed = copied.failed
+            totals.previewed = copied.previewed
+        except Exception as exc:
+            mapped = sheet_open_error(exc, settings.google_credentials_path)
+            _emit(
+                on_event,
+                kind="log",
+                message=(
+                    "Scrape finished, but Google Sheet send did not run: "
+                    f"{mapped or exc}. Rows stay in the GUI until the sheet is shared."
+                ),
+            )
     _emit(
         on_event,
         kind="done",
@@ -518,19 +550,16 @@ def sync_date_to_sheet(
             message=f"{_sheet_label(sheet)}: sync finished.",
         )
     if not opened:
-        detail = last_error or "Google Sheet could not be opened."
         _emit(
             on_event,
             kind="log",
             message=(
-                "Sync could not open any Google Sheet. Share the GUI sheet "
-                "with the service account as Editor, then Sync again."
+                "Sync could not open any Google Sheet. Scraped GUI rows were left "
+                "unchanged. Share the GUI sheet with the service account as Editor, "
+                "then Sync again."
+                + (f" ({last_error})" if last_error else "")
             ),
         )
-        for txn in candidates:
-            db.mark(txn.transaction_id, "failed", detail)
-            result.failed += 1
-            _emit(on_event, **txn_row_event(txn, "Failed", detail))
     _emit(
         on_event,
         kind="done",

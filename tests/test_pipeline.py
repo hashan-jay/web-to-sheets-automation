@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from src.database import GatheringDB
 from src.models import Transaction
-from src.pipeline import copy_pending_to_sheet, gather_from_dashboard, unsent_candidates
+from src.pipeline import copy_pending_to_sheet, gather_from_dashboard, run_pipeline, unsent_candidates
 from src.scraper import ScrapeCapture
 from tests.test_dashboard_api import _settings
 
@@ -43,6 +43,33 @@ class GatherEventsTests(unittest.TestCase):
         self.assertTrue(
             any("already in the GUI" in str(event.get("message") or "") for event in second_events)
         )
+
+    def test_gather_restores_failed_ids_to_the_gui(self) -> None:
+        events: list[dict] = []
+        txn = Transaction(
+            transaction_id="17113600240",
+            username="A2",
+            amount="15",
+            status="STAFF DEPOSIT",
+        )
+        capture = ScrapeCapture(
+            transactions=[txn],
+            website_records=1,
+            website_total="15.00",
+            filter_date="2026-09-21",
+            filter_status="COMPLETED",
+        )
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            settings = _settings(database_path=Path(folder) / "gathering.db")
+            db = GatheringDB(settings.database_path)
+            db.ingest([txn])
+            db.mark("17113600240", "failed", "sheet not shared")
+            with patch("src.pipeline.scrape_transactions", return_value=capture):
+                gather_from_dashboard(settings, db, on_event=events.append)
+            self.assertEqual(db.by_status("pending")[0].transaction_id, "17113600240")
+        gathered = [event for event in events if event.get("status") == "Gathered"]
+        self.assertEqual(len(gathered), 1)
+        self.assertIn("Restored", gathered[0].get("detail") or "")
 
 
 class UnsentCandidateTests(unittest.TestCase):
@@ -146,7 +173,7 @@ class SendStaffRowsTests(unittest.TestCase):
             ],
         )
 
-    def test_send_marks_failed_when_sheet_cannot_open(self) -> None:
+    def test_send_keeps_scraped_rows_when_sheet_cannot_open(self) -> None:
         events: list[dict] = []
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             settings = _settings(
@@ -174,9 +201,55 @@ class SendStaffRowsTests(unittest.TestCase):
             ):
                 result = copy_pending_to_sheet(settings, db, on_event=events.append)
         self.assertEqual(result.copied, 0)
-        self.assertEqual(result.failed, 1)
-        self.assertEqual(db.by_status("failed")[0].transaction_id, "17120000020")
+        self.assertEqual(result.failed, 0)
+        self.assertEqual(db.by_status("pending")[0].transaction_id, "17120000020")
+        self.assertFalse(any(event.get("status") == "Failed" for event in events))
         self.assertTrue(any("could not open" in str(item.get("message") or "") for item in events))
+
+
+class AutomatedRunScrapeTests(unittest.TestCase):
+    def test_pipeline_keeps_scrape_when_sheet_write_raises(self) -> None:
+        events: list[dict] = []
+        txn = Transaction(
+            transaction_id="17120000030",
+            username="A3",
+            amount="18",
+            status="STAFF DEPOSIT",
+            datetime="2026-09-21 12:00",
+        )
+        capture = ScrapeCapture(
+            transactions=[txn],
+            website_records=1,
+            website_total="18.00",
+            filter_date="2026-09-21",
+            filter_status="COMPLETED",
+        )
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            settings = _settings(
+                database_path=Path(folder) / "gathering.db",
+                google_sheet_id="1lpVFyp1c7mFw9iwttY4LF8mXRJBeA2thLZcNFjpH3_E",
+                filter_date_from="2026-09-21",
+            )
+            with (
+                patch("src.pipeline.scrape_transactions", return_value=capture),
+                patch(
+                    "src.pipeline.copy_pending_to_sheet",
+                    side_effect=PermissionError("The caller does not have permission"),
+                ),
+            ):
+                result = run_pipeline(
+                    settings,
+                    on_event=events.append,
+                    scrape=True,
+                    write_sheet=True,
+                )
+            db = GatheringDB(settings.database_path)
+            self.assertEqual(result.scraped, 1)
+            self.assertEqual(db.pending()[0].transaction_id, "17120000030")
+        self.assertTrue(any(event.get("status") == "Gathered" for event in events))
+        self.assertTrue(
+            any("Scrape finished" in str(event.get("message") or "") for event in events)
+        )
 
 
 if __name__ == "__main__":

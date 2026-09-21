@@ -15,6 +15,7 @@ from playwright.sync_api import (
 from src.config import Settings
 from src.dashboard_api import (
     dashboard_origin,
+    scrape_via_http,
     scrape_via_playwright_request,
 )
 from src.errors import ConfigError
@@ -1240,7 +1241,21 @@ def launch_dashboard_page(playwright, settings: Settings, block_heavy: bool = Tr
     }
     if settings.auth_state_path.exists():
         context_kwargs["storage_state"] = str(settings.auth_state_path)
-    browser = playwright.chromium.launch(**launch_kwargs)
+    try:
+        browser = playwright.chromium.launch(**launch_kwargs)
+    except Exception as exc:
+        if "Executable doesn't exist" not in str(exc):
+            raise
+        last_error = exc
+        for channel in ("chrome", "msedge"):
+            try:
+                browser = playwright.chromium.launch(**launch_kwargs, channel=channel)
+                last_error = None
+                break
+            except Exception as channel_exc:
+                last_error = channel_exc
+        if last_error is not None:
+            raise last_error from exc
     context = browser.new_context(**context_kwargs)
     page = context.new_page()
     if block_heavy:
@@ -1356,6 +1371,60 @@ def scrape_transactions(
         )
 
     types = staff_scrape_types(settings.filter_type)
+    if on_event:
+        on_event(
+            {
+                "kind": "log",
+                "message": (
+                    "Reading Completed STAFF DEPOSIT and STAFF WITHDRAW for "
+                    f"{day} from the dashboard API first."
+                ),
+            }
+        )
+    try:
+        api_capture = scrape_via_http(settings, limit=limit, on_event=on_event)
+    except Exception as exc:
+        api_capture = None
+        if on_event:
+            on_event(
+                {
+                    "kind": "log",
+                    "message": f"Dashboard API scrape did not run ({exc}). Opening the browser next.",
+                }
+            )
+    if api_capture is not None:
+        capture.website_records = int(api_capture.website_records or 0)
+        capture.website_total = str(api_capture.website_total or "")
+        rows = _stamp_tally_date(list(api_capture.transactions), day)
+        capture.transactions = rows[:limit] if limit else rows
+        if capture.transactions or capture.website_records == 0:
+            if on_event:
+                on_event(
+                    {
+                        "kind": "log",
+                        "message": (
+                            f"API scrape finished for {day}: "
+                            f"website Record {capture.website_records or 0}"
+                            + (
+                                f" · Total {capture.website_total}"
+                                if capture.website_total
+                                else ""
+                            )
+                            + f" · scraped {len(capture.transactions)} unique row(s)."
+                        ),
+                    }
+                )
+            return capture
+        if on_event:
+            on_event(
+                {
+                    "kind": "log",
+                    "message": (
+                        f"API reported Record {capture.website_records} but returned no rows. "
+                        "Opening the browser to read the Completed pages."
+                    ),
+                }
+            )
 
     def _read_type_pages(page, tx_type: str) -> tuple[int, str]:
         before = len(collected)
@@ -1489,13 +1558,23 @@ def scrape_transactions(
                 except Exception:
                     pass
 
-    if session is not None:
-        browser, context, page = session.start(settings)
-        _scrape_with(browser, context, page, close_browser=False)
-    else:
-        with sync_playwright() as playwright:
-            browser, context, page = launch_dashboard_page(playwright, settings)
-            _scrape_with(browser, context, page, close_browser=True)
+    try:
+        if session is not None:
+            browser, context, page = session.start(settings)
+            _scrape_with(browser, context, page, close_browser=False)
+        else:
+            with sync_playwright() as playwright:
+                browser, context, page = launch_dashboard_page(playwright, settings)
+                _scrape_with(browser, context, page, close_browser=True)
+    except Exception as exc:
+        text = str(exc)
+        if "Executable doesn't exist" in text or "playwright install" in text.lower():
+            raise ConfigError(
+                "Automated Run could not open Chromium. The dashboard API scrape "
+                "also returned no rows. Install browsers with `playwright install chromium`, "
+                "or keep a saved login so the API scrape can run without the browser."
+            ) from exc
+        raise
 
     rows = _stamp_tally_date(list(collected.values()), day)
     capture.transactions = rows[:limit] if limit else rows
