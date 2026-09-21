@@ -13,6 +13,7 @@ from src.config import (
     normalize_dashboard_url,
     normalize_google_sheet_id,
 )
+from src.mapper import normalize_sheet_brands
 
 _SAFE_RE = re.compile(r"[^a-zA-Z0-9._-]+")
 SITES_DIR = ROOT / "data" / "sites"
@@ -68,6 +69,7 @@ def empty_workspace_state() -> dict:
         "website": "",
         "username": "",
         "sheet_ids": [""] * len(GOOGLE_SHEET_SLOTS),
+        "sheet_brands": [],
     }
 
 
@@ -91,6 +93,7 @@ def load_workspace_state(key: str) -> dict:
     for index in range(len(GOOGLE_SHEET_SLOTS)):
         padded[index] = normalize_google_sheet_id(ids[index] if index < len(ids) else "")
     state["sheet_ids"] = padded
+    state["sheet_brands"] = normalize_sheet_brands(data.get("sheet_brands"))
     return state
 
 
@@ -100,6 +103,7 @@ def save_workspace_state(
     website: str = "",
     username: str = "",
     sheet_ids: list[str] | None = None,
+    sheet_brands: list[str] | None = None,
 ) -> dict:
     if not key:
         return empty_workspace_state()
@@ -113,6 +117,8 @@ def save_workspace_state(
         for index, value in enumerate(sheet_ids[: len(GOOGLE_SHEET_SLOTS)]):
             padded[index] = normalize_google_sheet_id(value)
         current["sheet_ids"] = padded
+    if sheet_brands is not None:
+        current["sheet_brands"] = normalize_sheet_brands(sheet_brands)
     path = workspace_state_path(key)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(current, indent=2), encoding="utf-8")
@@ -131,6 +137,7 @@ def seed_workspace_sheets(key: str, sheet_ids: list[str]) -> dict:
 def apply_workspace_to_settings(settings: Settings, key: str) -> Settings:
     settings.database_path = workspace_database_path(key)
     settings.auth_state_path = workspace_auth_path(key)
+    settings.sheet_brands = tuple(load_workspace_state(key).get("sheet_brands") or ())
     return settings
 
 

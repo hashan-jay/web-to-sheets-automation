@@ -258,6 +258,7 @@ class Settings:
     default_brand: str
     default_staff_code: str
     brand_aliases: dict[str, str] = field(default_factory=dict)
+    sheet_brands: tuple[str, ...] = ()
     allowed_brands: tuple[str, ...] = (
         "POKIESPARK",
         "FUCKSPIN",
@@ -335,6 +336,7 @@ class Settings:
             brand_aliases=_aliases(
                 os.getenv("BRAND_ALIASES", "FUCKSPINVIPA:FUCKSPIN,FUCKSPINVIPC:FUCKSPIN")
             ),
+            sheet_brands=(),
             allowed_brands=tuple(
                 part.strip().upper()
                 for part in os.getenv(

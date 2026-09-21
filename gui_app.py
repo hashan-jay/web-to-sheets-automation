@@ -187,7 +187,12 @@ from src.config import (
     load_gui_theme,
 )
 from src.database import GatheringDB, _transaction_from_payload
-from src.mapper import record_local_datetime, sheet_tab_name
+from src.mapper import (
+    MAX_SHEET_BRANDS,
+    normalize_sheet_brands,
+    record_local_datetime,
+    sheet_tab_name,
+)
 from src.sheets import SheetClient
 from src.pipeline import (
     process_new_notifications_only,
@@ -228,6 +233,7 @@ class FinanceAutomationApp:
         self.root.minsize(1100, 760)
         self.settings = Settings.load()
         self.workspace_key = ""
+        self._loaded_sheet_brands: list[str] = []
         self.events: queue.Queue[dict] = queue.Queue()
         self.worker: threading.Thread | None = None
         self._scrape_thread: threading.Thread | None = None
@@ -320,6 +326,7 @@ class FinanceAutomationApp:
 
         self._build_style()
         self._build_layout()
+        self._apply_brands_to_field(self._loaded_sheet_brands)
         self._apply_theme()
         self._refresh_counts()
         self._load_recent_rows()
@@ -588,6 +595,17 @@ class FinanceAutomationApp:
                 bd=0,
                 relief="flat",
             )
+        if hasattr(self, "brand_names_box"):
+            self.brand_names_box.configure(
+                bg=colors["log_bg"],
+                fg=colors["log_fg"],
+                insertbackground=colors["accent"],
+                highlightthickness=1,
+                highlightbackground=colors["border"],
+                highlightcolor=colors["accent"],
+                bd=0,
+                relief="flat",
+            )
         tags = TREE_TAGS_DARK if self.dark_mode.get() else TREE_TAGS_LIGHT
         for name in ("latest_tree", "deposits_tree", "withdrawals_tree", "sent_tree"):
             tree = getattr(self, name, None)
@@ -713,10 +731,44 @@ class FinanceAutomationApp:
         ttk.Label(sidebar, text="2FA code", style="Muted.TLabel").pack(anchor="w")
         ttk.Entry(sidebar, textvariable=self.login_2fa, width=28).pack(fill="x", pady=(2, 10))
 
+        ttk.Label(sidebar, text="Sheet brands", style="CardTitle.TLabel").pack(anchor="w")
+        ttk.Label(
+            sidebar,
+            text=(
+                f"Enter 1–{MAX_SHEET_BRANDS} Google Sheet brand names for this "
+                "website, one per line. KABOOM77VIPA, KABOOMVIPA, and VIPA all "
+                "write as KABOOM77 when that name is saved here."
+            ),
+            style="Muted.TLabel",
+            wraplength=280,
+        ).pack(anchor="w", pady=(2, 6))
+        self.brand_names_box = tk.Text(
+            sidebar,
+            height=5,
+            width=28,
+            wrap="word",
+            font=("Segoe UI", 9),
+            bg=self._colors()["log_bg"],
+            fg=self._colors()["log_fg"],
+            insertbackground=self._colors()["accent"],
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=self._colors()["border"],
+            padx=6,
+            pady=6,
+        )
+        self.brand_names_box.pack(fill="x", pady=(0, 6))
+        ttk.Button(
+            sidebar,
+            text="Save brands",
+            style="Quick.TButton",
+            command=self._save_sheet_brands,
+        ).pack(fill="x", pady=(0, 10))
+
         ttk.Label(sidebar, text="Saved accounts (3)", style="CardTitle.TLabel").pack(anchor="w")
         ttk.Label(
             sidebar,
-            text="Each account stores website, username, password, 2FA, and that site's Google Sheets. Click an account to show only that website's Latest scrape, Deposits, Withdrawals, and sent rows. A new website starts empty.",
+            text="Each account stores website, username, password, 2FA, sheet brands, and that site's Google Sheets. Click an account to show only that website's Latest scrape, Deposits, Withdrawals, and sent rows. A new website starts empty.",
             style="Muted.TLabel",
             wraplength=280,
         ).pack(anchor="w", pady=(2, 6))
@@ -1316,6 +1368,49 @@ class FinanceAutomationApp:
     def _sheet_ids_from_fields(self) -> list[str]:
         return [self._sheet_id_from_field(slot) for slot in GOOGLE_SHEET_SLOTS]
 
+    def _brands_from_field(self) -> list[str]:
+        box = getattr(self, "brand_names_box", None)
+        if box is None:
+            return list(self._loaded_sheet_brands)
+        return normalize_sheet_brands(box.get("1.0", "end"))
+
+    def _apply_brands_to_field(self, brands: list[str] | tuple[str, ...] | None) -> None:
+        names = normalize_sheet_brands(brands)
+        self._loaded_sheet_brands = names
+        box = getattr(self, "brand_names_box", None)
+        if box is None:
+            return
+        box.delete("1.0", "end")
+        if names:
+            box.insert("1.0", "\n".join(names))
+
+    def _save_sheet_brands(self) -> None:
+        if not self._current_workspace_key() and not self.workspace_key:
+            messagebox.showwarning(
+                "Website required",
+                "Enter the website and username first so these brands stay "
+                "with that login.",
+            )
+            return
+        if not self._switch_workspace_if_needed(log=False):
+            return
+        brands = self._brands_from_field()
+        if not brands:
+            messagebox.showwarning(
+                "No brand names",
+                f"Enter 1–{MAX_SHEET_BRANDS} brand names, one per line.",
+            )
+            return
+        self._apply_brands_to_field(brands)
+        self._save_current_workspace_state()
+        self.settings.sheet_brands = tuple(brands)
+        self._append_log(
+            "Saved "
+            + ", ".join(brands)
+            + " as this website's Google Sheet brand "
+            + ("name." if len(brands) == 1 else "names.")
+        )
+
     def _save_current_workspace_state(self, *, sheets_only: bool = False) -> None:
         if not self.workspace_key:
             return
@@ -1323,6 +1418,7 @@ class FinanceAutomationApp:
             save_workspace_state(
                 self.workspace_key,
                 sheet_ids=self._sheet_ids_from_fields(),
+                sheet_brands=self._brands_from_field(),
             )
             return
         save_workspace_state(
@@ -1330,6 +1426,7 @@ class FinanceAutomationApp:
             website=self.login_website.get(),
             username=self.login_username.get(),
             sheet_ids=self._sheet_ids_from_fields(),
+            sheet_brands=self._brands_from_field(),
         )
 
     def _reset_workspace_view(self) -> None:
@@ -1375,6 +1472,8 @@ class FinanceAutomationApp:
         state = load_workspace_state(key)
         if key and (any(state["sheet_ids"]) or not initial):
             self._apply_sheet_ids_to_fields(state["sheet_ids"])
+        self._apply_brands_to_field(state.get("sheet_brands") or [])
+        self.settings.sheet_brands = tuple(self._loaded_sheet_brands)
         self._persist_google_sheets(remember_workspace=False)
         self._reset_workspace_view()
         self._update_workspace_caption()
@@ -1559,6 +1658,8 @@ class FinanceAutomationApp:
         self.saved_password = password
         self.saved_2fa = twofa
         self._refresh_account_buttons()
+        if self.workspace_key:
+            self._save_current_workspace_state()
 
     def _scrape_date(self) -> str:
         selected = self.date_filter.get().strip()
@@ -1712,6 +1813,7 @@ class FinanceAutomationApp:
             sheet_id = self._sheet_id_from_field(slot)
             settings.set_sheet_id_at(slot, sheet_id)
         apply_workspace_to_settings(settings, self._current_workspace_key() or self.workspace_key)
+        settings.sheet_brands = tuple(self._brands_from_field())
         return settings
 
     def _scrape_ready(self, action: str) -> bool:

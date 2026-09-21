@@ -29,6 +29,9 @@ ALLOWED_BRANDS = (
     "WEMETH",
 )
 
+MAX_SHEET_BRANDS = 30
+_BRAND_SPLIT_RE = re.compile(r"[\n\r,;|]+")
+
 # Company Owner dropdown on Copy of GROUP D (Sheet 3).
 GROUP_D_GAMES = (
     "FUCKFUCK",
@@ -155,7 +158,84 @@ def captured_brand(value: str) -> str:
     )
 
 
+def brand_compact(value: object) -> str:
+    return re.sub(r"[^A-Z0-9]", "", str(value or "").upper())
+
+
+def brand_stem(value: object) -> str:
+    return re.sub(r"\d+$", "", brand_compact(value))
+
+
+def normalize_sheet_brands(raw: object) -> list[str]:
+    """Unique website brand names for the Google Sheet, at most 30."""
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        parts = _BRAND_SPLIT_RE.split(raw)
+    elif isinstance(raw, (list, tuple, set)):
+        parts = []
+        for item in raw:
+            parts.extend(_BRAND_SPLIT_RE.split(str(item or "")))
+    else:
+        parts = [str(raw)]
+    seen: set[str] = set()
+    brands: list[str] = []
+    for part in parts:
+        name = str(part or "").strip()
+        key = brand_compact(name)
+        if len(key) < 2 or key in seen:
+            continue
+        seen.add(key)
+        brands.append(name)
+        if len(brands) >= MAX_SHEET_BRANDS:
+            break
+    return brands
+
+
+def sheet_brand_choices(settings: Settings | None) -> tuple[str, ...]:
+    if settings is None:
+        return ()
+    return tuple(normalize_sheet_brands(getattr(settings, "sheet_brands", ())))
+
+
+def match_site_brand(scraped: object, brands: tuple[str, ...] | list[str]) -> str:
+    """Map a dashboard badge onto a configured sheet brand name.
+
+    KABOOM77VIPA / KABOOMVIPA / VIPA → KABOOM77 when that name is configured.
+    Several configured names use the longest unique prefix or letter-stem.
+    """
+    names = normalize_sheet_brands(brands)
+    if not names:
+        return ""
+    if len(names) == 1:
+        return names[0]
+    captured = captured_brand(str(scraped or "")) or str(scraped or "").strip()
+    compact = brand_compact(captured)
+    if not compact:
+        return ""
+    for name in names:
+        if brand_compact(name) == compact:
+            return name
+    ranked = sorted(names, key=lambda name: len(brand_compact(name)), reverse=True)
+    for name in ranked:
+        key = brand_compact(name)
+        if len(key) >= 3 and compact.startswith(key):
+            return name
+    for name in ranked:
+        stem = brand_stem(name)
+        if len(stem) >= 4 and compact.startswith(stem):
+            return name
+    for name in ranked:
+        key = brand_compact(name)
+        if len(key) >= 4 and key in compact:
+            return name
+    return ""
+
+
 def normalize_brand(value: str, settings: Settings | None = None) -> str:
+    brands = sheet_brand_choices(settings)
+    if brands:
+        return match_site_brand(value, brands)
     return captured_brand(value)
 
 
@@ -275,7 +355,10 @@ def to_sheet_row(
     row[SHEET_COL_AMOUNT] = sheet_amount(txn.amount, txn.status)
     row[SHEET_COL_STATUS] = sheet_status(txn.status)
     row[SHEET_COL_ID] = txn.transaction_id
-    if games:
+    brands = sheet_brand_choices(settings)
+    if brands:
+        row[SHEET_COL_COMPANY] = match_site_brand(txn.brand, brands)
+    elif games:
         row[SHEET_COL_COMPANY] = match_sheet_game(txn.brand, games)
     else:
         row[SHEET_COL_COMPANY] = normalize_brand(txn.brand, settings)

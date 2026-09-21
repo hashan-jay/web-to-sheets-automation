@@ -11,8 +11,11 @@ from src.mapper import (
     clean_name,
     day_from_datetime,
     first_brand_tag,
+    MAX_SHEET_BRANDS,
     match_sheet_game,
+    match_site_brand,
     normalize_brand,
+    normalize_sheet_brands,
     normalize_status,
     record_local_datetime,
     sheet_amount,
@@ -257,6 +260,57 @@ class MapperTests(unittest.TestCase):
             settings,
         )
         self.assertEqual(unchanged[SHEET_COL_COMPANY], "FUCKFUCKVIPC")
+
+    def test_normalize_sheet_brands_caps_at_thirty(self) -> None:
+        self.assertEqual(normalize_sheet_brands("KABOOM77\nKABOOM77, FUCKSPIN"), ["KABOOM77", "FUCKSPIN"])
+        self.assertEqual(normalize_sheet_brands([" pokiespark ", "", "POKIESPARK"]), ["pokiespark"])
+        too_many = [f"BRAND{index}" for index in range(1, 40)]
+        self.assertEqual(len(normalize_sheet_brands(too_many)), MAX_SHEET_BRANDS)
+
+    def test_single_site_brand_maps_vip_variants(self) -> None:
+        brands = ["KABOOM77"]
+        self.assertEqual(match_site_brand("KABOOM77VIPA", brands), "KABOOM77")
+        self.assertEqual(match_site_brand("KABOOM77VIPB", brands), "KABOOM77")
+        self.assertEqual(match_site_brand("KABOOM77VIPC", brands), "KABOOM77")
+        self.assertEqual(match_site_brand("KABOOM77VIPD", brands), "KABOOM77")
+        self.assertEqual(match_site_brand("KABOOMVIPA", brands), "KABOOM77")
+        self.assertEqual(match_site_brand("VIPA", brands), "KABOOM77")
+        self.assertEqual(match_site_brand("VIPB", brands), "KABOOM77")
+        self.assertEqual(match_site_brand("VIPC", brands), "KABOOM77")
+        self.assertEqual(match_site_brand("VIPD", brands), "KABOOM77")
+        self.assertEqual(match_site_brand("", brands), "KABOOM77")
+        settings = _settings()
+        settings.sheet_brands = ("KABOOM77",)
+        row = to_sheet_row(
+            Transaction(
+                transaction_id="9",
+                username="A1",
+                amount="10",
+                brand="KABOOM77VIPC",
+            ),
+            settings,
+        )
+        self.assertEqual(row[SHEET_COL_COMPANY], "KABOOM77")
+        self.assertEqual(normalize_brand("VIPA", settings), "KABOOM77")
+
+    def test_multi_site_brands_pick_the_matching_name(self) -> None:
+        brands = ["FUCKSPIN", "POKIESPARK", "JOINTMATE", "MM29"]
+        self.assertEqual(match_site_brand("FUCKSPINVIPA", brands), "FUCKSPIN")
+        self.assertEqual(match_site_brand("POKIESPARKVIPC", brands), "POKIESPARK")
+        self.assertEqual(match_site_brand("JOINTMATE88", brands), "JOINTMATE")
+        self.assertEqual(match_site_brand("MM29VIP", brands), "MM29")
+        self.assertEqual(match_site_brand("VIPA", brands), "")
+        self.assertEqual(match_site_brand("", brands), "")
+        settings = _settings()
+        settings.sheet_brands = tuple(brands)
+        self.assertEqual(
+            to_sheet_row(
+                Transaction(transaction_id="1", amount="10", brand="FUCKSPINVIPB"),
+                settings,
+                games=GROUP_D_GAMES,
+            )[SHEET_COL_COMPANY],
+            "FUCKSPIN",
+        )
 
 
 if __name__ == "__main__":

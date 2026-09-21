@@ -10,6 +10,7 @@ from src.mapper import (
     captured_brand,
     clean_name,
     is_withdraw,
+    sheet_brand_choices,
     sheet_game_choices,
     to_sheet_row,
     txn_local_date,
@@ -643,6 +644,17 @@ def _write_day_rows(
             f"to tab {sheet.tab_title()}."
         ),
     )
+    brands = sheet_brand_choices(settings)
+    if brands:
+        _emit(
+            on_event,
+            kind="log",
+            message=(
+                f"{_sheet_label(sheet)}: mapping website badges to "
+                + ", ".join(brands)
+                + "."
+            ),
+        )
     games = sheet_game_choices(
         settings,
         getattr(sheet, "sheet_id", ""),

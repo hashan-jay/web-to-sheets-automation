@@ -84,6 +84,31 @@ class WorkspaceStateTests(unittest.TestCase):
         self.assertEqual(second["sheet_ids"][0], "1otherSheetIdxxxxxxxxxxxxxxxYYYY")
         self.assertEqual(load_workspace_state(""), empty_workspace_state())
 
+    def test_save_and_load_sheet_brands_per_workspace(self) -> None:
+        key = "jkkbm77.u55y38.com__kaboom77finwd"
+        save_workspace_state(
+            key,
+            website="https://jkkbm77.u55y38.com/#transactions",
+            username="kaboom77finWD",
+            sheet_brands=["KABOOM77", "KABOOM77", " kaboom77 "],
+        )
+        other = "skgaming4.as6868.com__sk4srl"
+        save_workspace_state(
+            other,
+            website="https://skgaming4.as6868.com/#transactions",
+            username="sk4srl",
+            sheet_brands=["FUCKSPIN\nPOKIESPARK", "JOINTMATE"],
+        )
+        first = load_workspace_state(key)
+        second = load_workspace_state(other)
+        self.assertEqual(first["sheet_brands"], ["KABOOM77"])
+        self.assertEqual(second["sheet_brands"], ["FUCKSPIN", "POKIESPARK", "JOINTMATE"])
+        from src.config import Settings
+
+        settings = Settings.load()
+        apply_workspace_to_settings(settings, key)
+        self.assertEqual(settings.sheet_brands, ("KABOOM77",))
+
     def test_seed_sheets_only_when_empty(self) -> None:
         key = "site__user"
         seeded = seed_workspace_sheets(key, ["1BAXqHMZAP9-sVXGn_up32CkmOmwLiPAxDnYf3yqZiRo"])
