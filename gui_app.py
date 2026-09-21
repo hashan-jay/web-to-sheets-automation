@@ -195,9 +195,11 @@ from src.mapper import (
 )
 from src.sheets import SheetClient
 from src.pipeline import (
+    delete_transactions_for_date,
     process_new_notifications_only,
     run_pipeline,
     sync_date_to_sheet,
+    transactions_for_date,
     txn_row_event,
 )
 from src.tally import (
@@ -460,6 +462,24 @@ class FinanceAutomationApp:
             font=("Segoe UI", 9),
             padding=6,
             borderwidth=1,
+        )
+        self._flat(
+            style,
+            "Danger.TButton",
+            "#c62828",
+            "#b71c1c",
+            foreground="#ffffff",
+            font=("Segoe UI", 9, "bold"),
+            padding=6,
+            borderwidth=0,
+        )
+        style.map(
+            "Danger.TButton",
+            background=[("active", "#e53935"), ("pressed", "#8e0000")],
+            foreground=[("active", "#ffffff"), ("pressed", "#ffffff")],
+            bordercolor=[("active", "#e53935"), ("pressed", "#8e0000")],
+            lightcolor=[("active", "#e53935"), ("pressed", "#8e0000")],
+            darkcolor=[("active", "#e53935"), ("pressed", "#8e0000")],
         )
         self._flat(
             style,
@@ -983,6 +1003,12 @@ class FinanceAutomationApp:
         self.date_combo.pack(side="left", padx=(6, 8))
         self.date_combo.bind("<<ComboboxSelected>>", self._on_filters_changed)
         ttk.Button(filter_box, text="Today", command=self._select_today).pack(side="left")
+        ttk.Button(
+            filter_box,
+            text="Clear today's scrape",
+            style="Danger.TButton",
+            command=self._clear_today_scrape,
+        ).pack(side="left", padx=(8, 0))
         ttk.Label(filter_card, textvariable=self.filter_caption, style="Muted.TLabel").grid(
             row=2, column=0, columnspan=2, sticky="w", pady=(6, 0)
         )
@@ -1111,6 +1137,12 @@ class FinanceAutomationApp:
         self.send_latest_btn.pack(side="left", padx=(0, 8))
         self._on_auto_send_toggled()
         ttk.Button(controls, text="Clear this scrape", command=self._clear_latest).pack(side="left")
+        ttk.Button(
+            controls,
+            text="Clear today's scrape",
+            style="Danger.TButton",
+            command=self._clear_today_scrape,
+        ).pack(side="left", padx=(8, 0))
         ttk.Label(
             page,
             text="Shows new and not-yet-sent Completed rows. Already exported IDs stay out of this list. Send writes them to the day tab and into Google Sheet sent.",
@@ -1285,6 +1317,84 @@ class FinanceAutomationApp:
         self._append_log(
             "Cleared the latest scrape table. Google Sheet sent rows and saved "
             "deposits/withdrawals are unchanged."
+        )
+
+    def _ids_for_date(self, day: str) -> set[str]:
+        ids: set[str] = set()
+        wanted = self._display_date(day)
+        for rec in self.row_store.values():
+            if self._display_date(rec.get("date")) != wanted:
+                continue
+            values = rec.get("values") or ()
+            txn_id = str(values[1] if len(values) > 1 else "")
+            if txn_id:
+                ids.add(txn_id)
+        return ids
+
+    def _remove_rows_for_ids(self, txn_ids: set[str]) -> int:
+        if not txn_ids:
+            return 0
+        removed = 0
+        for key, rec in list(self.row_store.items()):
+            values = rec.get("values") or ()
+            txn_id = str(values[1] if len(values) > 1 else "")
+            if txn_id not in txn_ids:
+                continue
+            section, item = key
+            tree = self._tree_for(section)
+            if tree.exists(item):
+                tree.delete(item)
+            self.row_store.pop(key, None)
+            store_key = self._item_key(section, txn_id)
+            if self.row_items.get(store_key) == (section, item):
+                self.row_items.pop(store_key, None)
+            self.latest_run_ids.discard(txn_id)
+            removed += 1
+        return removed
+
+    def _clear_today_scrape(self) -> None:
+        if self._busy() or self.auto_running:
+            messagebox.showinfo(
+                "Finish the current run first",
+                "Stop Automated Run or wait for the current scrape/send to finish "
+                "before erasing today's scrape.",
+            )
+            return
+        today = local_today()
+        ids = self._ids_for_date(today) | {
+            txn.transaction_id for txn in transactions_for_date(self.db, today)
+        }
+        if not ids:
+            messagebox.showinfo(
+                "Nothing to erase",
+                f"There is no scraped data for today ({today}) on this website.",
+            )
+            return
+        if not messagebox.askyesno(
+            "Erase today's scrape",
+            f"Are you sure to erase all the data scraped today ({today}) "
+            f"for this website?\n\n"
+            f"Yes will remove {len(ids)} transaction(s) from Latest scrape, "
+            "Deposits, Withdrawals, and Google Sheet sent.\n"
+            "Records from other dates will not be erased.\n\n"
+            "No keeps everything as it is.",
+        ):
+            self._append_log("Clear today's scrape cancelled.")
+            return
+        deleted = delete_transactions_for_date(self.db, today)
+        self._remove_rows_for_ids(ids)
+        if self.website_date == today:
+            self.website_records = 0
+            self.website_total = ""
+        self.sheet_id_cache = set()
+        self.sheet_id_cache_date = ""
+        self._refresh_filter_options()
+        self._apply_filters()
+        self._refresh_counts()
+        self._update_filter_caption()
+        self._append_log(
+            f"Erased {max(deleted, len(ids))} scraped record(s) for today ({today}) "
+            "on this website only. Other dates were left unchanged."
         )
 
     def _toggle_deposit_details(self) -> None:

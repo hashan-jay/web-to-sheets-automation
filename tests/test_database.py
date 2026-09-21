@@ -4,7 +4,7 @@ from pathlib import Path
 
 from src.database import GatheringDB
 from src.models import Transaction
-from src.pipeline import transactions_for_date
+from src.pipeline import delete_transactions_for_date, transactions_for_date
 
 
 class GatheringDBTests(unittest.TestCase):
@@ -61,6 +61,36 @@ class GatheringDBTests(unittest.TestCase):
         )
         today = transactions_for_date(self.db, "2026-08-30")
         self.assertEqual([row.transaction_id for row in today], ["17110853310"])
+
+    def test_delete_for_date_leaves_other_days(self) -> None:
+        self.db.ingest(
+            [
+                Transaction(
+                    transaction_id="17110853340",
+                    amount="20",
+                    datetime="2026-09-21 10:00",
+                    extras={"tally_date": "2026-09-21"},
+                ),
+                Transaction(
+                    transaction_id="17110853341",
+                    amount="15",
+                    datetime="2026-09-20 10:00",
+                    extras={"tally_date": "2026-09-20"},
+                ),
+                Transaction(
+                    transaction_id="17110853342",
+                    amount="12",
+                    datetime="2026-09-21 11:00",
+                    extras={"tally_date": "2026-09-21"},
+                ),
+            ]
+        )
+        self.assertEqual(delete_transactions_for_date(self.db, "2026-09-21"), 2)
+        remaining = [row.transaction_id for row in self.db.pending()]
+        self.assertEqual(remaining, ["17110853341"])
+        self.assertEqual(self.db.delete_ids(["17110853341"]), 1)
+        self.assertEqual(self.db.all_records(), [])
+        self.assertEqual(delete_transactions_for_date(self.db, ""), 0)
 
     def test_ingest_fills_missing_brand_on_existing(self) -> None:
         self.db.ingest([Transaction(transaction_id="17110853330", amount="20")])

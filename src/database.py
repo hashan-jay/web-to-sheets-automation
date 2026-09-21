@@ -222,6 +222,18 @@ class GatheringDB:
             )
             return int(cur.rowcount)
 
+    def delete_ids(self, transaction_ids: list[str]) -> int:
+        ids = [item for item in transaction_ids if item]
+        if not ids:
+            return 0
+        placeholders = ",".join("?" for _ in ids)
+        with self._connect() as conn:
+            cur = conn.execute(
+                f"DELETE FROM notifications WHERE transaction_id IN ({placeholders})",
+                ids,
+            )
+            return int(cur.rowcount)
+
     def by_ids(self, transaction_ids: list[str]) -> list[Transaction]:
         ids = [item for item in transaction_ids if item]
         if not ids:

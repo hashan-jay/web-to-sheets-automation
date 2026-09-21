@@ -404,6 +404,15 @@ def _unique_transactions(rows: list[Transaction]) -> list[Transaction]:
     return unique
 
 
+def delete_transactions_for_date(db: GatheringDB, day: str) -> int:
+    """Erase gathered rows for one date only. Other days stay in the database."""
+    wanted = (day or "").strip()
+    if not wanted or wanted in {"All dates", "(blank)"}:
+        return 0
+    ids = [txn.transaction_id for txn in transactions_for_date(db, wanted)]
+    return db.delete_ids(ids)
+
+
 def transactions_for_date(db: GatheringDB, day: str) -> list[Transaction]:
     collected: list[Transaction] = []
     for row in db.all_records():
