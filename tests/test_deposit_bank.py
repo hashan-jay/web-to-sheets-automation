@@ -3,6 +3,7 @@ import unittest
 from src.deposit_bank import (
     discover_bank_choices,
     extract_attachment_url,
+    fill_deposit_banks,
     lookup_attachment_url,
     match_sheet_bank,
     sheet_bank_choices,
@@ -14,6 +15,11 @@ from tests.test_mapper import _settings
 
 
 class DepositBankTests(unittest.TestCase):
+    def test_fill_deposit_banks_skips_screenshot_ocr(self) -> None:
+        txn = Transaction(transaction_id="1", status="DEPOSIT", amount="10")
+        self.assertEqual(fill_deposit_banks(_settings(), [txn]), 0)
+        self.assertFalse((txn.extras or {}).get("sheet_bank"))
+
     def test_match_sheet_bank_from_screenshot_text(self) -> None:
         choices = ("ANZPLUS O'NEILL R W", "CBA SMITH J")
         self.assertEqual(

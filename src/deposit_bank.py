@@ -6,7 +6,6 @@ import shutil
 import subprocess
 import tempfile
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
@@ -238,90 +237,8 @@ def fill_deposit_banks(
     http=None,
     origin: str = "",
 ) -> int:
-    """Set extras['sheet_bank'] on deposits from ATTACHMENT screenshots.
-
-    Withdrawals are left blank. Failures do not stop the scrape or send.
-    """
-    accounts = tuple(choices or sheet_bank_choices(settings))
-    if not accounts:
-        _emit(
-            on_event,
-            kind="log",
-            message=(
-                "No Google Sheet BANK dropdown values were found, so deposit "
-                "ATTACHMENT matching cannot fill BANK."
-            ),
-        )
-        return 0
-    host = (origin or "").rstrip("/")
-    if not host:
-        try:
-            from src.dashboard_api import dashboard_origin
-
-            host = dashboard_origin(settings.dashboard_url)
-        except Exception:
-            host = ""
-    client = http
-    if client is None:
-        try:
-            from src.dashboard_api import DashboardClient
-
-            client = DashboardClient.from_settings(settings)
-        except Exception:
-            client = None
-    session = getattr(client, "http", None)
-    deposits = [
-        txn
-        for txn in transactions
-        if not is_withdraw(txn.status)
-        and not str((txn.extras or {}).get("sheet_bank") or "").strip()
-    ]
-    if not deposits:
-        return 0
-    cache: dict[str, str] = {}
-    matched = 0
-    workers = min(8, max(1, len(deposits)))
-    _emit(
-        on_event,
-        kind="log",
-        message=(
-            f"Reading ATTACHMENT screenshots for {len(deposits)} deposit(s) "
-            "to fill the Google Sheet BANK dropdown."
-        ),
-    )
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {
-            pool.submit(
-                resolve_deposit_bank,
-                txn,
-                accounts,
-                session,
-                host,
-                cache,
-            ): txn
-            for txn in deposits
-        }
-        for future in as_completed(futures):
-            txn = futures[future]
-            try:
-                bank = future.result()
-            except Exception:
-                bank = ""
-            if not bank:
-                continue
-            extras = dict(txn.extras or {})
-            extras["sheet_bank"] = bank
-            txn.extras = extras
-            matched += 1
-    _emit(
-        on_event,
-        kind="log",
-        message=(
-            f"BANK matched on {matched}/{len(deposits)} deposit attachment(s). "
-            "Withdrawals stay blank for manual entry."
-        ),
-    )
-    return matched
+    """BANK is left blank. Attachment screenshot OCR is disabled because it is slow."""
+    return 0
 
 
 def resolve_deposit_bank(

@@ -6,8 +6,7 @@ import time
 from src.config import Settings
 from src.dashboard_api import DashboardClient, dashboard_origin, post_with_page, scrape_via_http
 from src.database import GatheringDB
-from src.deposit_bank import discover_bank_choices, fill_deposit_banks, sheet_bank_choices
-from src.mapper import sheet_game_choices, to_sheet_row
+from src.mapper import is_withdraw, sheet_game_choices, to_sheet_row
 from src.models import Transaction
 from src.pipeline import EventFn, PipelineResult, _open_sheet, txn_row_event
 from src.sheets import SheetClient
@@ -84,9 +83,6 @@ class LiveSheetWriter:
                 continue
             games = self._games.get(int(getattr(sheet, "slot", 0) or 0))
             try:
-                configured = sheet_bank_choices(self.settings)
-                banks = configured if configured else discover_bank_choices(sheet)
-                fill_deposit_banks(self.settings, [txn], self.on_event, choices=banks)
                 sheet.write_row(
                     to_sheet_row(
                         txn,
@@ -105,6 +101,75 @@ class LiveSheetWriter:
             db.mark(txn.transaction_id, "copied", detail)
             if self.on_event:
                 self.on_event(txn_row_event(txn, "Copied", detail))
+
+    def push_many(self, db: GatheringDB, txns: list[Transaction], day: str) -> None:
+        if not self.clients:
+            return
+        if len(txns) <= 1:
+            for txn in txns:
+                self.push(db, txn, day)
+            return
+        for sheet in self.clients:
+            key = (int(getattr(sheet, "slot", 0) or 0), day)
+            try:
+                sheet.use_day(day)
+            except Exception as exc:
+                for txn in txns:
+                    db.mark(txn.transaction_id, "failed", str(exc))
+                    if self.on_event:
+                        self.on_event(txn_row_event(txn, "Failed", str(exc)))
+                continue
+            if key not in self._ids:
+                try:
+                    self._ids[key] = sheet.existing_ids()
+                except Exception as exc:
+                    for txn in txns:
+                        db.mark(txn.transaction_id, "failed", str(exc))
+                        if self.on_event:
+                            self.on_event(txn_row_event(txn, "Failed", str(exc)))
+                    continue
+            missing = [
+                txn for txn in txns if txn.transaction_id not in self._ids[key]
+            ]
+            for txn in txns:
+                if txn.transaction_id in self._ids[key]:
+                    detail = f"Already on Google Sheet tab {sheet.tab_title()}"
+                    db.mark(txn.transaction_id, "skipped", detail)
+                    if self.on_event:
+                        self.on_event(txn_row_event(txn, "Skipped", detail))
+            if not missing:
+                continue
+            games = self._games.get(int(getattr(sheet, "slot", 0) or 0))
+            deposits = [txn for txn in missing if not is_withdraw(txn.status)]
+            withdraws = [txn for txn in missing if is_withdraw(txn.status)]
+            for group, withdraw_block in ((deposits, False), (withdraws, True)):
+                if not group:
+                    continue
+                try:
+                    sheet.write_rows(
+                        [
+                            to_sheet_row(
+                                txn,
+                                self.settings,
+                                games=games,
+                                columns=getattr(sheet, "columns", None),
+                            )
+                            for txn in group
+                        ],
+                        withdraw=withdraw_block,
+                    )
+                except Exception as exc:
+                    for txn in group:
+                        db.mark(txn.transaction_id, "failed", str(exc))
+                        if self.on_event:
+                            self.on_event(txn_row_event(txn, "Failed", str(exc)))
+                    continue
+                detail = f"Row appended to Google Sheet tab {sheet.tab_title()}"
+                for txn in group:
+                    self._ids[key].add(txn.transaction_id)
+                    db.mark(txn.transaction_id, "copied", detail)
+                    if self.on_event:
+                        self.on_event(txn_row_event(txn, "Copied", detail))
 
 
 class LiveBrowser:
@@ -348,8 +413,7 @@ def run_live_completed(
                     if on_event:
                         on_event(txn_row_event(txn, "Gathered", "Live Completed"))
                 if writer:
-                    for txn in new_rows:
-                        writer.push(db, txn, day)
+                    writer.push_many(db, new_rows, day)
                 if on_event:
                     on_event(
                         {

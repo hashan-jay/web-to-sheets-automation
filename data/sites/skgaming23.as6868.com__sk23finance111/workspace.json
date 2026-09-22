@@ -17,5 +17,7 @@
     "BETCLUB6",
     "CUNTSPIN",
     "DEESPIN"
-  ]
+  ],
+  "deposit_start_row": 105,
+  "withdraw_start_row": 1700
 }

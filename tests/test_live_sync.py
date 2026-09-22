@@ -93,6 +93,10 @@ class LiveSyncTests(unittest.TestCase):
             def push(self, _db, txn, day: str) -> None:
                 written.append((txn.transaction_id, day))
 
+            def push_many(self, db, txns, day: str) -> None:
+                for txn in txns:
+                    self.push(db, txn, day)
+
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
             settings = _settings(database_path=Path(folder) / "gathering.db")
             with (

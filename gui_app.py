@@ -884,7 +884,7 @@ class FinanceAutomationApp:
         ).pack(fill="x", pady=3)
         ttk.Label(
             sidebar,
-            text="Automated Run opens the dashboard, selects the date, sets Type to STAFF DEPOSIT and STAFF WITHDRAW together with Status COMPLETED, and scrapes those Completed rows into the GUI. Deposits and withdrawals start on the Google Sheet rows you save below. Deposit ATTACHMENT screenshots fill BANK on deposit rows. Withdrawals stay blank for manual BANK entry. When Send Extracted records is checked, new IDs are written to the Google Sheet. After each scrape it waits the seconds you set, then starts the next. Stop Automated Run ends the loop.",
+            text="Automated Run opens the dashboard, selects the date, sets Type to STAFF DEPOSIT and STAFF WITHDRAW together with Status COMPLETED, and scrapes those Completed rows into the GUI. Deposits and withdrawals start on the Google Sheet rows you save below. BANK is left blank for manual entry. When Send Extracted records is checked, new IDs are written to the Google Sheet in a batch. After each scrape it waits the seconds you set, then starts the next. Stop Automated Run ends the loop.",
             style="Muted.TLabel",
             wraplength=280,
         ).pack(anchor="w", pady=(4, 10))
@@ -2045,7 +2045,7 @@ class FinanceAutomationApp:
         if self.scrape_withdrawals.get():
             types.append(STAFF_WITHDRAW_TYPE)
         settings.filter_type = ",".join(types) or f"{STAFF_DEPOSIT_TYPE},{STAFF_WITHDRAW_TYPE}"
-        settings.use_dashboard_api = False
+        settings.use_dashboard_api = True
         for slot in GOOGLE_SHEET_SLOTS:
             sheet_id = self._sheet_id_from_field(slot)
             settings.set_sheet_id_at(slot, sheet_id)
@@ -2152,7 +2152,7 @@ class FinanceAutomationApp:
             "Completed rows into the GUI, and send new IDs to the Google Sheet "
             f"(deposits from row {self.settings.deposit_start_row}, "
             f"withdrawals from row {self.settings.withdraw_start_row} on the day tab). "
-            "Deposit ATTACHMENT screenshots are used to fill BANK on deposit rows."
+            "BANK is left blank. Attachment screenshots are not read."
             f" The next scrape waits {seconds}s after this one finishes."
         )
         self._auto_tick()
@@ -2215,7 +2215,7 @@ class FinanceAutomationApp:
             "Type STAFF DEPOSIT + STAFF WITHDRAW, Status COMPLETED, "
             f"and scraping every page on {normalize_dashboard_url(self.login_website.get())}."
             + (
-                " Deposit ATTACHMENT screenshots will fill BANK on new deposit rows."
+                " New IDs are written to the Google Sheet without reading attachments."
                 if write_sheet
                 else ""
             )
