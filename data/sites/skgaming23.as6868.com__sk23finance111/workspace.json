@@ -18,6 +18,7 @@
     "CUNTSPIN",
     "DEESPIN"
   ],
+  "deposit_sheet_bank": "CHECK AUD B DEPOSIT BANK",
   "deposit_start_row": 105,
-  "withdraw_start_row": 1700
+  "withdraw_start_row": 1500
 }
