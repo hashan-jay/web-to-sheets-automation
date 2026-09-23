@@ -101,6 +101,45 @@ class GatherEventsTests(unittest.TestCase):
         self.assertEqual(stored[0].brand, "CUNTWIN")
         self.assertIn("CUNTWIN", stored[0].tags)
 
+    def test_gather_stamps_live_deposit_bank_on_deposits_only(self) -> None:
+        events: list[dict] = []
+        deposit = Transaction(
+            transaction_id="17120002001",
+            username="A9",
+            amount="50",
+            status="STAFF DEPOSIT",
+        )
+        withdraw = Transaction(
+            transaction_id="17120002002",
+            username="A10",
+            amount="25",
+            status="STAFF WITHDRAW",
+        )
+        capture = ScrapeCapture(
+            transactions=[deposit, withdraw],
+            website_records=2,
+            website_total="75.00",
+            filter_date="2026-09-23",
+            filter_status="COMPLETED",
+        )
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            settings = _settings(
+                database_path=Path(folder) / "gathering.db",
+                deposit_sheet_bank="Bank ANZ Plus LEANNE MARY HUMPHREYS (ANZ PLUS)",
+            )
+            db = GatheringDB(settings.database_path)
+            with patch("src.pipeline.scrape_transactions", return_value=capture):
+                gather_from_dashboard(settings, db, on_event=events.append)
+            stored = {txn.transaction_id: txn for txn in db.pending()}
+        self.assertEqual(
+            stored["17120002001"].extras.get("sheet_bank"),
+            "Bank ANZ Plus LEANNE MARY HUMPHREYS (ANZ PLUS)",
+        )
+        self.assertFalse((stored["17120002002"].extras or {}).get("sheet_bank"))
+        self.assertTrue(
+            any("Deposit BANK" in str(event.get("message") or "") for event in events)
+        )
+
 
 class UnsentCandidateTests(unittest.TestCase):
     def test_finds_copied_record_that_is_still_to_send(self) -> None:

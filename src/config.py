@@ -306,6 +306,7 @@ class Settings:
     google_sheet_id_5: str = ""
     deposit_start_row: int = DEFAULT_DEPOSIT_START_ROW
     withdraw_start_row: int = DEFAULT_WITHDRAW_START_ROW
+    deposit_sheet_bank: str = ""
 
     def sheet_id_at(self, slot: int) -> str:
         if int(slot) <= 1:

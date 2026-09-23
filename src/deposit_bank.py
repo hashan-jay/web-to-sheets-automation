@@ -229,6 +229,34 @@ def _emit(on_event: EventFn | None, **payload: object) -> None:
         on_event(payload)
 
 
+def normalize_deposit_sheet_bank(raw: object) -> str:
+    """Exact Google Sheet BANK dropdown label, or blank if the user left it empty."""
+    return " ".join(str(raw or "").split())
+
+
+def apply_deposit_sheet_bank(
+    settings: Settings | None,
+    transactions: list[Transaction],
+) -> int:
+    """Stamp the live GUI deposit bank onto deposit rows only.
+
+    Withdrawals stay untouched. An empty box writes a blank Bank cell.
+    """
+    bank = normalize_deposit_sheet_bank(
+        getattr(settings, "deposit_sheet_bank", "") if settings is not None else ""
+    )
+    filled = 0
+    for txn in transactions:
+        if is_withdraw(txn.status):
+            continue
+        extras = dict(txn.extras or {})
+        extras["sheet_bank"] = bank
+        txn.extras = extras
+        if bank:
+            filled += 1
+    return filled
+
+
 def fill_deposit_banks(
     settings: Settings,
     transactions: list[Transaction],
@@ -237,8 +265,16 @@ def fill_deposit_banks(
     http=None,
     origin: str = "",
 ) -> int:
-    """BANK is left blank. Attachment screenshot OCR is disabled because it is slow."""
-    return 0
+    """Use the live GUI deposit bank. Attachment screenshot OCR stays off."""
+    filled = apply_deposit_sheet_bank(settings, transactions)
+    if filled and on_event:
+        bank = normalize_deposit_sheet_bank(getattr(settings, "deposit_sheet_bank", ""))
+        _emit(
+            on_event,
+            kind="log",
+            message=f"Deposit BANK for this write: {bank}.",
+        )
+    return filled
 
 
 def resolve_deposit_bank(

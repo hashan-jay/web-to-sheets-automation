@@ -1,11 +1,13 @@
 import unittest
 
 from src.deposit_bank import (
+    apply_deposit_sheet_bank,
     discover_bank_choices,
     extract_attachment_url,
     fill_deposit_banks,
     lookup_attachment_url,
     match_sheet_bank,
+    normalize_deposit_sheet_bank,
     sheet_bank_choices,
     txn_attachment_url,
 )
@@ -19,6 +21,28 @@ class DepositBankTests(unittest.TestCase):
         txn = Transaction(transaction_id="1", status="DEPOSIT", amount="10")
         self.assertEqual(fill_deposit_banks(_settings(), [txn]), 0)
         self.assertFalse((txn.extras or {}).get("sheet_bank"))
+
+    def test_gui_deposit_bank_fills_deposits_only(self) -> None:
+        settings = _settings()
+        settings.deposit_sheet_bank = "  Bank ANZ Plus LEANNE MARY HUMPHREYS (ANZ PLUS) "
+        deposit = Transaction(transaction_id="1", status="STAFF DEPOSIT", amount="50")
+        withdraw = Transaction(transaction_id="2", status="STAFF WITHDRAW", amount="20")
+        self.assertEqual(normalize_deposit_sheet_bank(settings.deposit_sheet_bank), "Bank ANZ Plus LEANNE MARY HUMPHREYS (ANZ PLUS)")
+        self.assertEqual(apply_deposit_sheet_bank(settings, [deposit, withdraw]), 1)
+        self.assertEqual(
+            deposit.extras.get("sheet_bank"),
+            "Bank ANZ Plus LEANNE MARY HUMPHREYS (ANZ PLUS)",
+        )
+        self.assertFalse((withdraw.extras or {}).get("sheet_bank"))
+        self.assertEqual(sheet_bank(deposit, settings), "Bank ANZ Plus LEANNE MARY HUMPHREYS (ANZ PLUS)")
+        self.assertEqual(to_sheet_row(deposit, settings)[2], "Bank ANZ Plus LEANNE MARY HUMPHREYS (ANZ PLUS)")
+        self.assertEqual(sheet_bank(withdraw, settings), "")
+        self.assertEqual(to_sheet_row(withdraw, settings)[2], "")
+        settings.deposit_sheet_bank = ""
+        later = Transaction(transaction_id="3", status="DEPOSIT", amount="10")
+        self.assertEqual(apply_deposit_sheet_bank(settings, [later]), 0)
+        self.assertEqual(later.extras.get("sheet_bank"), "")
+        self.assertEqual(to_sheet_row(later, settings)[2], "")
 
     def test_match_sheet_bank_from_screenshot_text(self) -> None:
         choices = ("ANZPLUS O'NEILL R W", "CBA SMITH J")

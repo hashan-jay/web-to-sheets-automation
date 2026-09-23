@@ -109,6 +109,27 @@ class WorkspaceStateTests(unittest.TestCase):
         apply_workspace_to_settings(settings, key)
         self.assertEqual(settings.sheet_brands, ("KABOOM77",))
 
+    def test_save_and_load_deposit_sheet_bank(self) -> None:
+        key = "skgaming23.as6868.com__sk23finance111"
+        save_workspace_state(
+            key,
+            deposit_sheet_bank="  Bank ANZ Plus LEANNE MARY HUMPHREYS (ANZ PLUS) ",
+        )
+        state = load_workspace_state(key)
+        self.assertEqual(
+            state["deposit_sheet_bank"],
+            "Bank ANZ Plus LEANNE MARY HUMPHREYS (ANZ PLUS)",
+        )
+        save_workspace_state(key, deposit_sheet_bank="")
+        cleared = load_workspace_state(key)
+        self.assertEqual(cleared["deposit_sheet_bank"], "")
+        from src.config import Settings
+
+        save_workspace_state(key, deposit_sheet_bank="CBA SMITH J")
+        settings = Settings.load()
+        apply_workspace_to_settings(settings, key)
+        self.assertEqual(settings.deposit_sheet_bank, "CBA SMITH J")
+
     def test_save_and_load_sheet_start_rows(self) -> None:
         key = "skgaming23.as6868.com__sk23finance111"
         save_workspace_state(key, deposit_start_row=200, withdraw_start_row=2500)

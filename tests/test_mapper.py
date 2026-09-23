@@ -158,6 +158,16 @@ class MapperTests(unittest.TestCase):
             to_sheet_row(deposit_bank, settings)[2],
             "ANZPLUS O'NEILL R W",
         )
+        settings.deposit_sheet_bank = "CBA SMITH J"
+        live_deposit = Transaction(
+            transaction_id="17110853301",
+            amount="40",
+            status="STAFF DEPOSIT",
+        )
+        self.assertEqual(sheet_bank(live_deposit, settings), "CBA SMITH J")
+        self.assertEqual(to_sheet_row(live_deposit, settings)[2], "CBA SMITH J")
+        settings.deposit_sheet_bank = ""
+        self.assertEqual(sheet_bank(live_deposit, settings), "")
 
     def test_withdraw_card_mapping(self) -> None:
         settings = _settings()

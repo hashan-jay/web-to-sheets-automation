@@ -433,7 +433,9 @@ def sheet_bank(txn: Transaction, settings: Settings) -> str:
     if is_withdraw(txn.status):
         return ""
     extras = txn.extras or {}
-    return str(extras.get("sheet_bank") or "").strip()
+    if "sheet_bank" in extras:
+        return str(extras.get("sheet_bank") or "").strip()
+    return " ".join(str(getattr(settings, "deposit_sheet_bank", "") or "").split())
 
 
 def sheet_description(txn: Transaction) -> str:

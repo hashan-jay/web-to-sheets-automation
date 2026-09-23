@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 from src.config import Settings
 from src.database import GatheringDB, _transaction_from_payload
-from src.deposit_bank import fill_deposit_banks
+from src.deposit_bank import apply_deposit_sheet_bank, fill_deposit_banks
 from src.mapper import (
     apply_sheet_brands,
     clean_name,
@@ -148,6 +148,7 @@ def gather_from_dashboard(
         settings, limit=limit, on_event=on_event, once=once, session=session
     )
     transactions = apply_sheet_brands(list(capture.transactions), settings)
+    banked = apply_deposit_sheet_bank(settings, transactions)
     result.scraped = len(transactions)
     result.website_records = capture.website_records
     result.website_total = capture.website_total
@@ -218,6 +219,16 @@ def gather_from_dashboard(
             on_event,
             kind="log",
             message=f"{missing_brand} row(s) had no brand badge on the dashboard.",
+        )
+    if banked:
+        deposit_bank = " ".join(str(getattr(settings, "deposit_sheet_bank", "") or "").split())
+        _emit(
+            on_event,
+            kind="log",
+            message=(
+                f"Deposit BANK '{deposit_bank}' will be written for "
+                f"{banked} deposit row(s) on this scrape. Withdrawals stay blank."
+            ),
         )
     _emit(
         on_event,

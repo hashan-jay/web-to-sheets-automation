@@ -308,6 +308,7 @@ class FinanceAutomationApp:
         self.google_sheet_2 = self.google_sheet_vars[1]
         self.deposit_start_row = tk.StringVar(value=str(self.settings.deposit_start_row))
         self.withdraw_start_row = tk.StringVar(value=str(self.settings.withdraw_start_row))
+        self.deposit_sheet_bank = tk.StringVar(value="")
         self.db = GatheringDB(self.settings.database_path)
         self.dark_mode = tk.BooleanVar(value=load_gui_theme() == "dark")
         self.auto_running = False
@@ -826,6 +827,22 @@ class FinanceAutomationApp:
                 command=lambda number=slot: self._save_account(number),
             ).pack(side="right")
         self._refresh_account_buttons()
+
+        ttk.Label(
+            sidebar,
+            text="BANK NAME for DEPOSIT Transactions Only",
+            style="CardTitle.TLabel",
+        ).pack(anchor="w", pady=(4, 2))
+        ttk.Label(
+            sidebar,
+            text="Optional. Typed into Google Sheet Bank cells for deposits only. Leave blank to keep those cells empty. Changes apply from the next scrape.",
+            style="Muted.TLabel",
+            wraplength=260,
+            justify="left",
+        ).pack(anchor="w")
+        bank_entry = ttk.Entry(sidebar, textvariable=self.deposit_sheet_bank, width=28)
+        bank_entry.pack(fill="x", pady=(2, 10))
+        bank_entry.bind("<FocusOut>", self._persist_deposit_sheet_bank)
 
         ttk.Label(sidebar, text="What to scrape", style="CardTitle.TLabel").pack(anchor="w", pady=(4, 6))
         ttk.Checkbutton(sidebar, text="Scrape STAFF DEPOSIT", variable=self.scrape_deposits).pack(anchor="w")
@@ -1556,6 +1573,25 @@ class FinanceAutomationApp:
             + ("name." if len(brands) == 1 else "names.")
         )
 
+    def _deposit_sheet_bank_from_field(self) -> str:
+        var = getattr(self, "deposit_sheet_bank", None)
+        if var is None:
+            return str(getattr(self.settings, "deposit_sheet_bank", "") or "")
+        return " ".join(str(var.get() or "").split())
+
+    def _apply_deposit_sheet_bank_to_field(self, bank: object) -> None:
+        value = " ".join(str(bank or "").split())
+        var = getattr(self, "deposit_sheet_bank", None)
+        if var is not None:
+            var.set(value)
+        self.settings.deposit_sheet_bank = value
+
+    def _persist_deposit_sheet_bank(self, _event=None) -> None:
+        bank = self._deposit_sheet_bank_from_field()
+        self._apply_deposit_sheet_bank_to_field(bank)
+        if self.workspace_key:
+            save_workspace_state(self.workspace_key, deposit_sheet_bank=bank)
+
     def _save_current_workspace_state(self, *, sheets_only: bool = False) -> None:
         if not self.workspace_key:
             return
@@ -1564,6 +1600,7 @@ class FinanceAutomationApp:
                 self.workspace_key,
                 sheet_ids=self._sheet_ids_from_fields(),
                 sheet_brands=self._brands_from_field(),
+                deposit_sheet_bank=self._deposit_sheet_bank_from_field(),
             )
             return
         save_workspace_state(
@@ -1572,6 +1609,7 @@ class FinanceAutomationApp:
             username=self.login_username.get(),
             sheet_ids=self._sheet_ids_from_fields(),
             sheet_brands=self._brands_from_field(),
+            deposit_sheet_bank=self._deposit_sheet_bank_from_field(),
         )
 
     def _reset_workspace_view(self) -> None:
@@ -1619,6 +1657,7 @@ class FinanceAutomationApp:
             self._apply_sheet_ids_to_fields(state["sheet_ids"])
         self._apply_brands_to_field(state.get("sheet_brands") or [])
         self.settings.sheet_brands = tuple(self._loaded_sheet_brands)
+        self._apply_deposit_sheet_bank_to_field(state.get("deposit_sheet_bank") or "")
         self._apply_start_rows_to_fields(
             state.get("deposit_start_row"),
             state.get("withdraw_start_row"),
@@ -2051,6 +2090,7 @@ class FinanceAutomationApp:
             settings.set_sheet_id_at(slot, sheet_id)
         apply_workspace_to_settings(settings, self._current_workspace_key() or self.workspace_key)
         settings.sheet_brands = tuple(self._brands_from_field())
+        settings.deposit_sheet_bank = self._deposit_sheet_bank_from_field()
         settings.deposit_start_row = int(self.settings.deposit_start_row)
         settings.withdraw_start_row = int(self.settings.withdraw_start_row)
         return settings
@@ -2152,8 +2192,13 @@ class FinanceAutomationApp:
             "Completed rows into the GUI, and send new IDs to the Google Sheet "
             f"(deposits from row {self.settings.deposit_start_row}, "
             f"withdrawals from row {self.settings.withdraw_start_row} on the day tab). "
-            "BANK is left blank. Attachment screenshots are not read."
-            f" The next scrape waits {seconds}s after this one finishes."
+            + (
+                f"Deposit BANK uses '{self._deposit_sheet_bank_from_field()}'. "
+                if self._deposit_sheet_bank_from_field()
+                else "Deposit BANK stays blank unless you type a name in the sidebar. "
+            )
+            + "Attachment screenshots are not read."
+            + f" The next scrape waits {seconds}s after this one finishes."
         )
         self._auto_tick()
 
@@ -2491,6 +2536,7 @@ class FinanceAutomationApp:
     def _start_sheet_send(self, ids: list[str], label: str) -> None:
         self._persist_google_sheets()
         settings = self._current_settings()
+        self._persist_deposit_sheet_bank()
         self.status_text.set("Sending to Google Sheet...")
         self.open_sent_after_send = True
         slots = [f"Sheet {slot}" for slot, _sheet_id in settings.sheet_slots()]
@@ -2551,6 +2597,7 @@ class FinanceAutomationApp:
         self._scrape_busy = True
         self.bulk_loading = True
         settings = self._current_settings()
+        self._persist_deposit_sheet_bank()
         if write_sheet:
             sheet_note = (
                 "Each extracted record will be sent to the Google Sheet automatically."
