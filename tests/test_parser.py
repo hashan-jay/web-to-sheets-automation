@@ -94,6 +94,33 @@ class ParserTests(unittest.TestCase):
         rows = parse_transactions_from_html(html)
         self.assertEqual(rows[0].brand, "FUCKFUCKVIPC")
 
+    def test_parse_brand_from_pending_and_cuntwin_tags(self) -> None:
+        html = """
+        <div id="transactions-list"><table><tbody>
+        <tr class="PROCESSING " data-id="17120001001">
+          <td>
+            <a class="link profile"><i class="fa fa-user"></i>Pisey Pich<span class="name-blacklist">CUNTWIN</span><span class="name-blacklist">PENDING</span></a>
+            <div class="type STAFF DEPOSIT">STAFF DEPOSIT</div>
+            <div class="copy">Username: A9<input type="text" class="hidden" value="A9"></div>
+            <div class="copy">amount: 50<input type="text" class="hidden" value="50"></div>
+          </td>
+        </tr>
+        <tr class="PROCESSING " data-id="17120001002">
+          <td>
+            <a class="link profile">Other Player<span class="badge">PENDING</span><span class="label">CUNTWIN</span><span class="label">NETLOSSA</span></a>
+            <div class="type STAFF DEPOSIT">STAFF DEPOSIT</div>
+            <div class="copy">Username: A10<input type="text" class="hidden" value="A10"></div>
+            <div class="copy">amount: 25<input type="text" class="hidden" value="25"></div>
+          </td>
+        </tr>
+        </tbody></table></div>
+        """
+        rows = parse_transactions_from_html(html)
+        self.assertEqual(rows[0].brand, "CUNTWIN")
+        self.assertEqual(rows[0].tags, ["CUNTWIN"])
+        self.assertEqual(rows[1].brand, "CUNTWIN")
+        self.assertIn("CUNTWIN", rows[1].tags)
+
 
 if __name__ == "__main__":
     unittest.main()

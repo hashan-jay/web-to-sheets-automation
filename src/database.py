@@ -6,6 +6,7 @@ from dataclasses import asdict, fields
 from datetime import datetime
 from pathlib import Path
 
+from src.mapper import collect_brand_tags, is_noise_brand_token
 from src.models import Transaction
 
 _TXN_FIELDS = {item.name for item in fields(Transaction)}
@@ -34,6 +35,11 @@ def _now() -> str:
 def _transaction_from_payload(payload: str) -> Transaction:
     data = json.loads(payload)
     data.setdefault("extras", {})
+    tags = data.get("tags")
+    if isinstance(tags, str):
+        data["tags"] = [tags] if tags.strip() else []
+    elif not isinstance(tags, list):
+        data.pop("tags", None)
     return Transaction(**{key: data[key] for key in _TXN_FIELDS if key in data})
 
 
@@ -84,11 +90,27 @@ class GatheringDB:
                     incoming = asdict(txn)
                     extras = data.get("extras") or {}
                     extras.update(incoming.pop("extras") or {})
+                    incoming_tags = incoming.pop("tags", None) or []
+                    incoming_brand = incoming.pop("brand", "") or ""
                     for key, value in incoming.items():
                         if not value:
                             continue
-                        if key == "brand" or not data.get(key):
+                        if not data.get(key):
                             data[key] = value
+                    if incoming_brand and not is_noise_brand_token(incoming_brand):
+                        current = str(data.get("brand") or "")
+                        if not current or is_noise_brand_token(current):
+                            data["brand"] = incoming_brand
+                        else:
+                            data["brand"] = incoming_brand
+                    merged_tags = collect_brand_tags(
+                        data.get("tags"),
+                        incoming_tags,
+                        data.get("brand"),
+                        incoming_brand,
+                    )
+                    if merged_tags:
+                        data["tags"] = merged_tags
                     data["extras"] = extras
                     conn.execute(
                         "UPDATE notifications SET payload_json = ? WHERE transaction_id = ?",

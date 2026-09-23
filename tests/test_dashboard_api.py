@@ -116,6 +116,15 @@ class DashboardApiTests(unittest.TestCase):
         self.assertEqual(txn.created, "2026-08-29 10:44")
         self.assertEqual(txn.processed, "2026-08-29 10:44")
         self.assertEqual(txn.brand, "FUCKFUCKVIPC")
+        self.assertEqual(txn.tags, ["FUCKFUCKVIPC"])
+        pending_user = dict(SAMPLE_ROW["user"])
+        pending_user["tags"] = ["PENDING", "CUNTWIN", "NETLOSSB"]
+        pending_row = dict(SAMPLE_ROW)
+        pending_row["user"] = pending_user
+        pending_row["id"] = 17120001001
+        pending = transaction_from_api(pending_row)
+        self.assertEqual(pending.brand, "CUNTWIN")
+        self.assertEqual(pending.tags, ["CUNTWIN"])
         self.assertEqual(txn.attachment, "")
         with_receipt = dict(SAMPLE_ROW)
         with_receipt["type"] = "DEPOSIT"

@@ -10,5 +10,7 @@
   ],
   "sheet_brands": [
     "KABOOM77"
-  ]
+  ],
+  "deposit_start_row": 105,
+  "withdraw_start_row": 1024
 }

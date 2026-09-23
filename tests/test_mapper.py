@@ -8,7 +8,9 @@ from src.mapper import (
     SHEET_COL_COUNT,
     SHEET_COL_PLAYER,
     SHEET_COL_STAFF,
+    apply_sheet_brands,
     clean_name,
+    collect_brand_tags,
     day_from_datetime,
     detect_sheet_columns,
     first_brand_tag,
@@ -20,8 +22,10 @@ from src.mapper import (
     normalize_sheet_id,
     normalize_status,
     record_local_datetime,
+    resolve_txn_brand,
     sheet_amount,
     sheet_bank,
+    sheet_company_value,
     sheet_game_choices,
     is_withdraw,
     sheet_status,
@@ -60,6 +64,11 @@ class MapperTests(unittest.TestCase):
         self.assertEqual(first_brand_tag("NETLOSSB", "FUCKSPINVIPC"), "FUCKSPINVIPC")
         self.assertEqual(first_brand_tag("NETLOSSN"), "")
         self.assertEqual(first_brand_tag(""), "")
+        self.assertEqual(first_brand_tag("PENDING", "CUNTWIN"), "CUNTWIN")
+        self.assertEqual(first_brand_tag("CUNTWIN", "PENDING"), "CUNTWIN")
+        self.assertEqual(first_brand_tag("PENDING", "NETLOSSB", "CUNTWIN"), "CUNTWIN")
+        self.assertEqual(first_brand_tag("PENDING"), "")
+        self.assertEqual(collect_brand_tags("PENDING", "CUNTWIN", "NETLOSSA"), ["CUNTWIN"])
 
     def test_clean_name_strips_tag(self) -> None:
         self.assertEqual(
@@ -313,6 +322,51 @@ class MapperTests(unittest.TestCase):
             )[SHEET_COL_COMPANY],
             "FUCKSPIN",
         )
+
+    def test_multi_tags_match_configured_cuntwin_brand(self) -> None:
+        brands = [
+            "CUNTWIN",
+            "COKESPIN",
+            "MATE29",
+            "SPINOO",
+            "FF29",
+            "BETCLUB6",
+            "CUNTSPIN",
+            "DEESPIN",
+        ]
+        self.assertEqual(match_site_brand(["PENDING", "CUNTWIN"], brands), "CUNTWIN")
+        self.assertEqual(match_site_brand(["CUNTWIN", "PENDING"], brands), "CUNTWIN")
+        self.assertEqual(match_site_brand(["CUNTWINVIPA", "PENDING"], brands), "CUNTWIN")
+        self.assertEqual(match_site_brand("PENDING CUNTWIN NETLOSSA", brands), "CUNTWIN")
+        self.assertEqual(match_site_brand(["PENDING", "NETLOSSB"], brands), "")
+        settings = _settings()
+        settings.sheet_brands = tuple(brands)
+        txn = Transaction(
+            transaction_id="17120001001",
+            username="A9",
+            amount="50",
+            status="STAFF DEPOSIT",
+            brand="",
+            tags=["PENDING", "CUNTWIN"],
+        )
+        self.assertEqual(sheet_company_value(txn, settings), "CUNTWIN")
+        self.assertEqual(to_sheet_row(txn, settings)[SHEET_COL_COMPANY], "CUNTWIN")
+        apply_sheet_brands([txn], settings)
+        self.assertEqual(txn.brand, "CUNTWIN")
+        self.assertEqual(resolve_txn_brand(txn, settings), "CUNTWIN")
+        vip = Transaction(
+            transaction_id="17120001002",
+            amount="20",
+            brand="PENDING",
+            tags=["CUNTWINVIPC", "PENDING", "NETLOSSB"],
+        )
+        self.assertEqual(sheet_company_value(vip, settings), "CUNTWIN")
+        other = Transaction(
+            transaction_id="17120001003",
+            amount="15",
+            tags=["DEESPINVIPA", "PENDING"],
+        )
+        self.assertEqual(sheet_company_value(other, settings), "DEESPIN")
 
     def test_detect_sheet_columns_uses_headers(self) -> None:
         columns = detect_sheet_columns(

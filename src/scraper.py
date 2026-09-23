@@ -20,7 +20,7 @@ from src.dashboard_api import (
 )
 from src.errors import ConfigError
 from src.live_page import persist_dashboard_url, scrape_open_browser
-from src.mapper import captured_brand
+from src.mapper import apply_sheet_brands, captured_brand, collect_brand_tags, first_brand_tag
 from src.models import Transaction
 from src.tally import (
     COMPLETED_STATUS,
@@ -471,12 +471,12 @@ EXTRACT_CARDS_JS = r"""
     const data = { transaction_id: (tr.getAttribute("data-id") || "").trim() };
     const type = tr.querySelector("div.type");
     if (type) data.status = type.textContent.trim().toUpperCase();
-    const skipBrand = /^(COPY|NETLOSS|DEPOSIT|WITHDRAW|WITHDRAWAL|STAFF|STAFF DEPOSIT|STAFF WITHDRAW|STAFFDEPOSIT|STAFFWITHDRAW|UNCLAIM|MANUAL|CREATED|PROCESSED)$/i;
+    const skipBrand = /^(COPY|NETLOSS|DEPOSIT|WITHDRAW|WITHDRAWAL|STAFF|STAFF DEPOSIT|STAFF WITHDRAW|STAFFDEPOSIT|STAFFWITHDRAW|UNCLAIM|MANUAL|CREATED|PROCESSED|PENDING|COMPLETED|COMPLETE|APPROVED|REJECTED|PROCESSING|ACTIVE|INACTIVE|SUCCESS|FAILED|CANCEL|CANCELLED|CANCELED|HOLD|REVIEW|VIP)$/i;
     const isBrandPill = (value) => {
       const text = String(value || "").trim();
       if (text.length < 3 || text.length > 40) return false;
       if (skipBrand.test(text) || /^NETLOSS/i.test(text)) return false;
-      return /^[A-Z0-9][A-Z0-9._-]*$/.test(text) && /[A-Z]/.test(text);
+      return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(text) && /[A-Za-z]/.test(text);
     };
     const pillSelectors = [
       "span.name-blacklist",
@@ -501,6 +501,7 @@ EXTRACT_CARDS_JS = r"""
         if (text && !pills.includes(text)) pills.push(text);
       }
     }
+    data.tags = pills;
     data.brand = pills.find(isBrandPill) || "";
     for (const copy of tr.querySelectorAll("div.copy")) {
       const hidden = copy.querySelector("input.hidden, input[type='text']");
@@ -1090,6 +1091,13 @@ def _goto_next_page(page: Page) -> bool:
 
 
 def _to_transaction(raw: dict) -> Transaction:
+    raw_tags = raw.get("tags") or []
+    if isinstance(raw_tags, str):
+        raw_tags = [raw_tags]
+    tags = collect_brand_tags(raw.get("brand"), raw_tags)
+    brand = first_brand_tag(str(raw.get("brand") or ""), *tags) or captured_brand(
+        str(raw.get("brand") or "")
+    )
     return Transaction(
         transaction_id=str(raw.get("transaction_id") or "").strip(),
         username=str(raw.get("Username") or "").strip(),
@@ -1109,11 +1117,12 @@ def _to_transaction(raw: dict) -> Transaction:
         status=str(raw.get("status") or "").strip(),
         created=str(raw.get("created") or "").strip(),
         processed=str(raw.get("processed") or "").strip(),
-        brand=captured_brand(str(raw.get("brand") or "")),
+        brand=brand,
         bsb=str(raw.get("BankBSB") or "").strip(),
         pay_id=str(raw.get("PayID") or "").strip(),
         bank_lock=str(raw.get("BankLock") or "").strip(),
         attachment=str(raw.get("attachment") or "").strip(),
+        tags=tags,
         extras={"attachment": str(raw.get("attachment") or "").strip()}
         if str(raw.get("attachment") or "").strip()
         else {},
@@ -1135,6 +1144,19 @@ def _stamp_tally_date(rows: list[Transaction], day: str) -> list[Transaction]:
         extras["tally_date"] = day
         txn.extras = extras
     return rows
+
+
+def _ready_rows(
+    rows: list[Transaction],
+    settings: Settings,
+    day: str,
+    limit: int | None = None,
+) -> list[Transaction]:
+    stamped = _stamp_tally_date(list(rows), day)
+    apply_sheet_brands(stamped, settings)
+    if limit:
+        return stamped[:limit]
+    return stamped
 
 
 def _capture_from_api(api, day: str, limit: int | None) -> ScrapeCapture | None:
@@ -1361,7 +1383,7 @@ def scrape_transactions(
             capture.website_total = str(summary["total"] or "")
         if collected:
             rows = list(collected.values())
-            capture.transactions = _stamp_tally_date(rows[:limit] if limit else rows, day)
+            capture.transactions = _ready_rows(rows, settings, day, limit)
             return capture
 
     if not settings.dashboard_url:
@@ -1395,8 +1417,9 @@ def scrape_transactions(
     if api_capture is not None:
         capture.website_records = int(api_capture.website_records or 0)
         capture.website_total = str(api_capture.website_total or "")
-        rows = _stamp_tally_date(list(api_capture.transactions), day)
-        capture.transactions = rows[:limit] if limit else rows
+        capture.transactions = _ready_rows(
+            list(api_capture.transactions), settings, day, limit
+        )
         if capture.transactions or capture.website_records == 0:
             if on_event:
                 on_event(
@@ -1576,8 +1599,7 @@ def scrape_transactions(
             ) from exc
         raise
 
-    rows = _stamp_tally_date(list(collected.values()), day)
-    capture.transactions = rows[:limit] if limit else rows
+    capture.transactions = _ready_rows(list(collected.values()), settings, day, limit)
     return capture
 
 

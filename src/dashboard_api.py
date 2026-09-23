@@ -10,7 +10,7 @@ import requests
 
 from src.config import Settings, normalize_dashboard_url
 from src.deposit_bank import extract_attachment_url
-from src.mapper import captured_brand, first_brand_tag
+from src.mapper import apply_sheet_brands, collect_brand_tags, first_brand_tag
 from src.models import Transaction
 from src.tally import COMPLETED_STATUS, format_amount, parse_amount, staff_scrape_types
 
@@ -203,7 +203,7 @@ def _amount(value: object) -> str:
     return f"{number:.2f}".rstrip("0").rstrip(".")
 
 
-def _brand_from_row(row: dict, user: dict, details: dict) -> str:
+def _brand_parts(row: dict, user: dict, details: dict) -> list[str]:
     parts: list[str] = []
     for blob in (user, details, row):
         if not isinstance(blob, dict):
@@ -224,7 +224,12 @@ def _brand_from_row(row: dict, user: dict, details: dict) -> str:
             parts.extend(_text(item) for item in tags)
         elif _text(tags):
             parts.append(_text(tags))
-    return first_brand_tag(*parts) or captured_brand(" ".join(part for part in parts if part))
+    return [part for part in parts if part]
+
+
+def _brand_from_row(row: dict, user: dict, details: dict) -> str:
+    parts = _brand_parts(row, user, details)
+    return first_brand_tag(*parts) or ""
 
 
 def transaction_from_api(row: dict) -> Transaction:
@@ -278,6 +283,7 @@ def transaction_from_api(row: dict) -> Transaction:
         created=_format_dt(row.get("createdDateTime")),
         processed=_format_dt(row.get("processedDateTime")),
         brand=_brand_from_row(row, user, details),
+        tags=collect_brand_tags(*_brand_parts(row, user, details)),
         bsb=_text(bank_info.get("bsb") or bank_info.get("BSB") or bank_info.get("bankBsb")),
         pay_id=_text(bank_info.get("payId") or bank_info.get("payID") or bank_info.get("PayID")),
         bank_lock=_text(
@@ -436,6 +442,7 @@ def fetch_completed(
     rows = list(collected.values())
     if limit:
         rows = rows[:limit]
+    apply_sheet_brands(rows, settings)
     return ApiCapture(
         transactions=rows,
         website_records=total_count,

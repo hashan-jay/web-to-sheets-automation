@@ -120,28 +120,99 @@ _SKIP_BRAND_TOKENS = {
     "PAYID",
     "BANKLOCK",
     "BANKBSB",
+    "PENDING",
+    "COMPLETED",
+    "COMPLETE",
+    "APPROVED",
+    "REJECTED",
+    "PROCESSING",
+    "PROCESS",
+    "ACTIVE",
+    "INACTIVE",
+    "SUCCESS",
+    "FAILED",
+    "FAIL",
+    "CANCEL",
+    "CANCELLED",
+    "CANCELED",
+    "HOLD",
+    "HOLDING",
+    "REVIEW",
+    "VERIFY",
+    "VERIFIED",
+    "DONE",
+    "PAID",
+    "UNPAID",
+    "OPEN",
+    "CLOSE",
+    "CLOSED",
+    "LOCK",
+    "LOCKED",
+    "UNLOCK",
+    "VIP",
+    "NEW",
+    "OLD",
+    "KYC",
+    "OK",
+    "YES",
+    "NO",
 }
 
 
-def first_brand_tag(*parts: str) -> str:
-    """Return the first dashboard brand badge, ignoring NETLOSS labels.
+def is_noise_brand_token(value: object) -> bool:
+    """True for status / label pills that are never a site brand."""
+    upper = str(value or "").strip().upper()
+    if not upper:
+        return True
+    if upper.startswith("NETLOSS"):
+        return True
+    return upper in _SKIP_BRAND_TOKENS
 
-    On the admin site the first black/blue pill after the player name is the
-    brand (e.g. FUCKFUCKVIPC). The second pill is a loss tag such as NETLOSSB.
-    """
+
+def iter_brand_tokens(*parts: object) -> tuple[str, ...]:
+    tokens: list[str] = []
+    seen: set[str] = set()
     for part in parts:
-        for token in re.split(r"[\s,|/]+", part or ""):
-            tag = token.strip("[]() ")
-            if len(tag) < 3 or len(tag) > 40:
-                continue
-            upper = tag.upper()
-            if upper.startswith("NETLOSS") or upper in _SKIP_BRAND_TOKENS:
-                continue
-            if not any(ch.isalpha() for ch in tag):
-                continue
-            if re.fullmatch(r"[A-Za-z0-9._-]+", tag):
-                return upper
-    return ""
+        if part is None:
+            continue
+        chunks: list[str]
+        if isinstance(part, (list, tuple, set)):
+            chunks = [str(item or "") for item in part]
+        else:
+            chunks = [str(part)]
+        for chunk in chunks:
+            for token in re.split(r"[\s,|/]+", chunk or ""):
+                tag = token.strip("[]() ")
+                if len(tag) < 3 or len(tag) > 40:
+                    continue
+                if is_noise_brand_token(tag):
+                    continue
+                if not any(ch.isalpha() for ch in tag):
+                    continue
+                if not re.fullmatch(r"[A-Za-z0-9._-]+", tag):
+                    continue
+                upper = tag.upper()
+                if upper in seen:
+                    continue
+                seen.add(upper)
+                tokens.append(upper)
+    return tuple(tokens)
+
+
+def collect_brand_tags(*parts: object) -> list[str]:
+    """Every brand-looking dashboard pill, in page order."""
+    return list(iter_brand_tokens(*parts))
+
+
+def first_brand_tag(*parts: str) -> str:
+    """Return the first dashboard brand badge, ignoring NETLOSS / status labels.
+
+    On the admin site one, two, or three pills sit after the player name. The
+    brand (e.g. CUNTWIN or FUCKFUCKVIPC) can appear in any slot; later pills
+    are often PENDING or NETLOSSB.
+    """
+    tokens = iter_brand_tokens(*parts)
+    return tokens[0] if tokens else ""
 
 
 def resolve_brand(*parts: str, default: str = "") -> str:
@@ -153,8 +224,10 @@ def captured_brand(value: str) -> str:
     raw = (value or "").strip()
     if not raw:
         return ""
+    if is_noise_brand_token(raw) and " " not in raw and "," not in raw:
+        return ""
     return first_brand_tag(raw) or (
-        raw.upper() if not raw.upper().startswith("NETLOSS") else ""
+        raw.upper() if not is_noise_brand_token(raw) else ""
     )
 
 
@@ -198,9 +271,30 @@ def sheet_brand_choices(settings: Settings | None) -> tuple[str, ...]:
     return tuple(normalize_sheet_brands(getattr(settings, "sheet_brands", ())))
 
 
-def match_site_brand(scraped: object, brands: tuple[str, ...] | list[str]) -> str:
-    """Map a dashboard badge onto a configured sheet brand name.
+def _score_brand_match(captured: object, name: str) -> int:
+    """Higher is a tighter match. 0 means this configured name does not fit."""
+    compact = brand_compact(captured)
+    key = brand_compact(name)
+    if not compact or not key:
+        return 0
+    if compact == key:
+        return 400 + len(key)
+    if len(key) >= 3 and compact.startswith(key):
+        return 300 + len(key)
+    stem = brand_stem(name)
+    if len(stem) >= 4 and compact.startswith(stem):
+        return 200 + len(stem)
+    if len(key) >= 4 and key in compact:
+        return 100 + len(key)
+    if len(compact) >= 4 and compact in key:
+        return 80 + len(compact)
+    return 0
 
+
+def match_site_brand(scraped: object, brands: tuple[str, ...] | list[str]) -> str:
+    """Map one or more dashboard pills onto a configured sheet brand name.
+
+    Looks through every tag so PENDING / NETLOSS never hide CUNTWIN.
     KABOOM77VIPA / KABOOMVIPA / VIPA → KABOOM77 when that name is configured.
     Several configured names use the longest unique prefix or letter-stem.
     """
@@ -209,27 +303,26 @@ def match_site_brand(scraped: object, brands: tuple[str, ...] | list[str]) -> st
         return ""
     if len(names) == 1:
         return names[0]
-    captured = captured_brand(str(scraped or "")) or str(scraped or "").strip()
-    compact = brand_compact(captured)
-    if not compact:
-        return ""
-    for name in names:
-        if brand_compact(name) == compact:
-            return name
-    ranked = sorted(names, key=lambda name: len(brand_compact(name)), reverse=True)
-    for name in ranked:
-        key = brand_compact(name)
-        if len(key) >= 3 and compact.startswith(key):
-            return name
-    for name in ranked:
-        stem = brand_stem(name)
-        if len(stem) >= 4 and compact.startswith(stem):
-            return name
-    for name in ranked:
-        key = brand_compact(name)
-        if len(key) >= 4 and key in compact:
-            return name
-    return ""
+    candidates = collect_brand_tags(scraped)
+    if not candidates:
+        leftover = ""
+        if isinstance(scraped, (list, tuple, set)):
+            leftover = " ".join(str(item or "") for item in scraped).strip()
+        else:
+            leftover = str(scraped or "").strip()
+        if leftover and not is_noise_brand_token(leftover):
+            compact = brand_compact(leftover)
+            if compact:
+                candidates = [compact]
+    best_name = ""
+    best_score = 0
+    for captured in candidates:
+        for name in names:
+            score = _score_brand_match(captured, name)
+            if score > best_score:
+                best_score = score
+                best_name = name
+    return best_name
 
 
 def normalize_brand(value: str, settings: Settings | None = None) -> str:
@@ -237,6 +330,42 @@ def normalize_brand(value: str, settings: Settings | None = None) -> str:
     if brands:
         return match_site_brand(value, brands)
     return captured_brand(value)
+
+
+def txn_brand_sources(txn: Transaction) -> list[str]:
+    extras = txn.extras or {}
+    return collect_brand_tags(
+        txn.brand,
+        getattr(txn, "tags", None),
+        extras.get("tags"),
+        extras.get("brand"),
+    )
+
+
+def resolve_txn_brand(txn: Transaction, settings: Settings | None = None) -> str:
+    """Configured sheet brand when possible, else the captured dashboard badge."""
+    sources = txn_brand_sources(txn)
+    brands = sheet_brand_choices(settings)
+    if brands:
+        matched = match_site_brand(sources or txn.brand, brands)
+        if matched:
+            return matched
+    return first_brand_tag(*sources) or captured_brand(txn.brand)
+
+
+def apply_sheet_brands(
+    transactions: list[Transaction],
+    settings: Settings | None,
+) -> list[Transaction]:
+    """Store every brand pill and the matched GUI brand name on each row."""
+    for txn in transactions:
+        tags = txn_brand_sources(txn)
+        if tags:
+            txn.tags = tags
+        matched = resolve_txn_brand(txn, settings)
+        if matched:
+            txn.brand = matched
+    return transactions
 
 
 def uses_group_d_games(spreadsheet_title: str) -> bool:
@@ -459,9 +588,17 @@ def sheet_company_value(
     games: tuple[str, ...] | None = None,
 ) -> str:
     brands = sheet_brand_choices(settings)
+    sources = txn_brand_sources(txn)
     if brands:
-        return match_site_brand(txn.brand, brands)
+        matched = match_site_brand(sources or txn.brand, brands)
+        if matched:
+            return matched
+        return first_brand_tag(*sources) or captured_brand(txn.brand)
     if games:
+        for badge in sources or collect_brand_tags(txn.brand):
+            game = match_sheet_game(badge, games)
+            if game:
+                return game
         return match_sheet_game(txn.brand, games)
     return normalize_brand(txn.brand, settings)
 

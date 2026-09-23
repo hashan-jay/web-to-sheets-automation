@@ -71,6 +71,36 @@ class GatherEventsTests(unittest.TestCase):
         self.assertEqual(len(gathered), 1)
         self.assertIn("Restored", gathered[0].get("detail") or "")
 
+    def test_gather_maps_pending_tag_to_sheet_brand(self) -> None:
+        events: list[dict] = []
+        txn = Transaction(
+            transaction_id="17120001001",
+            username="A9",
+            amount="50",
+            status="STAFF DEPOSIT",
+            tags=["PENDING", "CUNTWIN"],
+        )
+        capture = ScrapeCapture(
+            transactions=[txn],
+            website_records=1,
+            website_total="50.00",
+            filter_date="2026-09-23",
+            filter_status="COMPLETED",
+        )
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as folder:
+            settings = _settings(
+                database_path=Path(folder) / "gathering.db",
+                sheet_brands=("CUNTWIN", "COKESPIN", "MATE29"),
+            )
+            db = GatheringDB(settings.database_path)
+            with patch("src.pipeline.scrape_transactions", return_value=capture):
+                gather_from_dashboard(settings, db, on_event=events.append)
+            stored = db.pending()
+        gathered = [event for event in events if event.get("status") == "Gathered"]
+        self.assertEqual(gathered[0].get("brand"), "CUNTWIN")
+        self.assertEqual(stored[0].brand, "CUNTWIN")
+        self.assertIn("CUNTWIN", stored[0].tags)
+
 
 class UnsentCandidateTests(unittest.TestCase):
     def test_finds_copied_record_that_is_still_to_send(self) -> None:

@@ -24,4 +24,5 @@ class Transaction:
     pay_id: str = ""
     bank_lock: str = ""
     attachment: str = ""
+    tags: list[str] = field(default_factory=list)
     extras: dict[str, str] = field(default_factory=dict)

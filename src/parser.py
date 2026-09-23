@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from html import unescape
 
-from src.mapper import captured_brand, first_brand_tag
+from src.mapper import captured_brand, collect_brand_tags, first_brand_tag
 from src.models import Transaction
 
 ID_RE = re.compile(r"#(\d{8,})")
@@ -67,6 +67,7 @@ def parse_transactions_from_html(html: str) -> list[Transaction]:
             brand_tags = [tag.strip() for tag in SPAN_TAG_RE.findall(body) if tag.strip()]
         created = CREATED_HTML_RE.search(body)
         processed = PROCESSED_HTML_RE.search(body)
+        tags = collect_brand_tags(*brand_tags)
         txn = Transaction(
             transaction_id=txn_id,
             username=values.get("username", ""),
@@ -86,6 +87,7 @@ def parse_transactions_from_html(html: str) -> list[Transaction]:
             bsb=values.get("bsb", ""),
             pay_id=values.get("pay_id", ""),
             bank_lock=values.get("bank_lock", ""),
+            tags=tags,
         )
         if txn.username or txn.amount:
             rows.append(txn)
@@ -121,6 +123,8 @@ def _parse_chunk(transaction_id: str, chunk: str) -> Transaction:
     created = CREATED_RE.search(chunk)
     processed = PROCESSED_RE.search(chunk)
     brand = BRAND_RE.search(chunk)
+    raw_brand = brand.group(1) if brand else ""
+    tags = collect_brand_tags(raw_brand)
     return Transaction(
         transaction_id=transaction_id,
         username=values.get("username", ""),
@@ -136,8 +140,9 @@ def _parse_chunk(transaction_id: str, chunk: str) -> Transaction:
         status=(status_match.group(1).upper() if status_match else ""),
         created=created.group(1) if created else "",
         processed=processed.group(1) if processed else "",
-        brand=first_brand_tag(brand.group(1) if brand else ""),
+        brand=first_brand_tag(raw_brand),
         bsb=values.get("bsb", ""),
         pay_id=values.get("pay_id", ""),
         bank_lock=values.get("bank_lock", ""),
+        tags=tags,
     )

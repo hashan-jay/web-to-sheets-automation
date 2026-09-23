@@ -100,6 +100,31 @@ class GatheringDBTests(unittest.TestCase):
         pending = self.db.pending()
         self.assertEqual(pending[0].brand, "FUCKFUCKVIPC")
 
+    def test_ingest_keeps_real_brand_when_pending_tag_arrives(self) -> None:
+        self.db.ingest(
+            [
+                Transaction(
+                    transaction_id="17110853331",
+                    amount="50",
+                    brand="CUNTWIN",
+                    tags=["CUNTWIN"],
+                )
+            ]
+        )
+        self.db.ingest(
+            [
+                Transaction(
+                    transaction_id="17110853331",
+                    amount="50",
+                    brand="PENDING",
+                    tags=["PENDING"],
+                )
+            ]
+        )
+        pending = self.db.pending()
+        self.assertEqual(pending[0].brand, "CUNTWIN")
+        self.assertEqual(pending[0].tags, ["CUNTWIN"])
+
     def test_ingest_updates_tally_date_on_existing(self) -> None:
         first = Transaction(
             transaction_id="17110853320",

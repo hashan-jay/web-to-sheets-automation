@@ -7,10 +7,11 @@ from src.config import Settings
 from src.database import GatheringDB, _transaction_from_payload
 from src.deposit_bank import fill_deposit_banks
 from src.mapper import (
-    captured_brand,
+    apply_sheet_brands,
     clean_name,
     is_withdraw,
     normalize_sheet_id,
+    resolve_txn_brand,
     sheet_brand_choices,
     sheet_game_choices,
     to_sheet_row,
@@ -80,7 +81,12 @@ def _row_detail(txn: Transaction, message: str) -> str:
     return f"{prefix} — {message}" if prefix else message
 
 
-def txn_row_event(txn: Transaction, copy_status: str, detail: str) -> dict:
+def txn_row_event(
+    txn: Transaction,
+    copy_status: str,
+    detail: str,
+    settings: Settings | None = None,
+) -> dict:
     return {
         "kind": "row",
         "transaction_id": txn.transaction_id,
@@ -96,7 +102,7 @@ def txn_row_event(txn: Transaction, copy_status: str, detail: str) -> dict:
         "pay_id": txn.pay_id,
         "bank_lock": txn.bank_lock,
         "method": txn.method,
-        "brand": captured_brand(txn.brand),
+        "brand": resolve_txn_brand(txn, settings),
         "datetime": txn.datetime,
         "created": txn.created,
         "processed": txn.processed,
@@ -141,7 +147,7 @@ def gather_from_dashboard(
     capture = scrape_transactions(
         settings, limit=limit, on_event=on_event, once=once, session=session
     )
-    transactions = capture.transactions
+    transactions = apply_sheet_brands(list(capture.transactions), settings)
     result.scraped = len(transactions)
     result.website_records = capture.website_records
     result.website_total = capture.website_total
@@ -300,7 +306,12 @@ def copy_pending_to_sheet(
 ) -> PipelineResult:
     result = PipelineResult()
     day = (settings.filter_date_from or "").strip() or local_today()
-    pending = unsent_candidates(db, day=day, only_ids=only_ids)
+    pending = apply_sheet_brands(
+        unsent_candidates(db, day=day, only_ids=only_ids),
+        settings,
+    )
+    if pending:
+        db.ingest(pending)
     if not pending:
         _emit(on_event, kind="log", message="No pending notifications in the gathering database.")
         return result
@@ -609,6 +620,7 @@ def _send_missing_day_rows(
     on_event: EventFn | None,
     one_by_one: bool = False,
 ) -> None:
+    txns = apply_sheet_brands(list(txns), settings)
     try:
         sheet.use_day(day)
     except Exception as exc:
@@ -693,6 +705,7 @@ def _write_day_rows(
     one_by_one: bool = False,
     known_ids: set[str] | None = None,
 ) -> None:
+    txns = apply_sheet_brands(list(txns), settings)
     try:
         sheet.use_day(day)
     except Exception as exc:

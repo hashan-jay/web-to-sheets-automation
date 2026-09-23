@@ -3308,6 +3308,7 @@ class FinanceAutomationApp:
                 txn,
                 str(row["copy_status"]).title(),
                 row["detail"] or "",
+                settings=self.settings,
             )
         return event
 
