@@ -7,5 +7,9 @@
     "",
     "",
     ""
-  ]
+  ],
+  "sheet_brands": [],
+  "deposit_sheet_bank": "",
+  "deposit_start_row": 105,
+  "withdraw_start_row": 1024
 }
